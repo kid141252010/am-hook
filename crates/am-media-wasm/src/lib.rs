@@ -14,6 +14,7 @@ use am_media::defrag::{defragment, Options};
 use am_media::mv::{mux_init, Stream};
 use am_media::playready::{parse_pssh, Cdm, Device, Entropy};
 use am_media::readahead::{Sink, Source};
+use am_media::tags::{Cover, CoverFormat, Tags};
 use am_media::{Error, Result};
 
 #[cfg(target_arch = "wasm32")]
@@ -339,6 +340,44 @@ pub extern "C" fn media_defrag(input: u32, output: u32, song: i32) -> i32 {
             return Err(Error::new("defrag output is not empty"));
         }
         let options = if song != 0 { Options::song() } else { Options::mv() };
+        defragment(HostFile { handle: input, pos: 0 }, &mut out, &options)?;
+        Ok(out.pos.to_be_bytes().to_vec())
+    })
+}
+/// Defragments `input` into `output` (like [`media_defrag`], which is unchanged),
+/// additionally writing iTunes metadata tags.
+///
+/// # Safety
+/// `tags_ptr` must point to `tags_len` readable bytes containing valid UTF-8
+/// JSON describing [`Tags`]. `cover_ptr` must point to `cover_len` readable
+/// bytes. All pointers must remain valid for the duration of the call.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn media_defrag_tags(
+    input: u32,
+    output: u32,
+    song: i32,
+    tags_ptr: *const u8,
+    tags_len: usize,
+    cover_ptr: *const u8,
+    cover_len: usize,
+) -> i32 {
+    run(|_| {
+        let mut out = HostFile { handle: output, pos: 0 };
+        if out.size() != 0 {
+            return Err(Error::new("defrag output is not empty"));
+        }
+        let mut tags: Tags = serde_json::from_str(text(tags_ptr, tags_len)?)
+            .map_err(|e| Error::msg(format!("invalid tags JSON: {e}")))?;
+        if cover_len > 0 {
+            let format: CoverFormat = tags
+                .cover_format
+                .ok_or_else(|| Error::new("cover format missing"))?;
+            let cover_bytes = bytes(cover_ptr, cover_len);
+            tags.cover = Some(Cover { format, data: cover_bytes.to_vec() });
+        }
+        let mut options = if song != 0 { Options::song() } else { Options::mv() };
+        options.tags = Some(tags);
         defragment(HostFile { handle: input, pos: 0 }, &mut out, &options)?;
         Ok(out.pos.to_be_bytes().to_vec())
     })
