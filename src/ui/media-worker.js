@@ -49,7 +49,7 @@ function withFiles(input, output, fn) {
   try { return fn(1, 2); } finally { files.clear(); }
 }
 // Synchronous OPFS handles are worker-only; the core streams through them without buffering the file.
-async function defrag(song, input, output, dir) {
+async function defrag(song, input, output, dir, tags) {
   let folder = await navigator.storage.getDirectory();
   if (dir) folder = await folder.getDirectoryHandle(dir);
   const source = await (await folder.getFileHandle(input)).createSyncAccessHandle();
@@ -57,12 +57,14 @@ async function defrag(song, input, output, dir) {
   try {
     target = await (await folder.getFileHandle(output, { create: true })).createSyncAccessHandle();
     target.truncate(0);
-    const result = size(withFiles(source, target, (i, o) => invoke('media_defrag', i, o, song)));
+    const result = size(withFiles(source, target, (i, o) => tags
+      ? invoke('media_defrag_tags', i, o, song, tags.json, tags.cover || new Uint8Array(0))
+      : invoke('media_defrag', i, o, song)));
     target.flush(); return result;
   } finally { source.close(); target?.close(); }
 }
 // Without OPFS (e.g. plain HTTP), the same code reads a Blob's bytes and returns a Blob.
-async function defragBlob(blob) {
+async function defragBlob(blob, tags) {
   const bytes = new Uint8Array(await blob.arrayBuffer()), parts = [];
   let length = 0;
   const source = { getSize: () => bytes.length, read: (view, { at }) => { const part = bytes.subarray(at, at + view.length); view.set(part); return part.length; } };
@@ -70,7 +72,9 @@ async function defragBlob(blob) {
     if (at !== length) return -1;
     parts.push(view.slice()); length += view.length; return view.length;
   } };
-  withFiles(source, target, (i, o) => invoke('media_defrag', i, o, 1));
+  withFiles(source, target, (i, o) => tags
+    ? invoke('media_defrag_tags', i, o, 1, tags.json, tags.cover || new Uint8Array(0))
+    : invoke('media_defrag', i, o, 1));
   return new Blob(parts, { type: blob.type });
 }
 
@@ -82,9 +86,9 @@ const methods = {
   fragment: (name, raw, key, mux, sequence) => invoke('media_fragment', name, raw, key, mux ? 1 : 0, sequence),
   muxInit: (video, audio, duration) => invoke('media_mux_init', video, audio, duration),
   release: name => { invoke('media_release', name); },
-  defrag: (input, output) => defrag(0, input, output),
+  defrag: (input, output, tags) => defrag(0, input, output, undefined, tags),
   // defragSong(blob) or defragSong(input, output, dir): the reference song layout.
-  defragSong: (...args) => args[0] instanceof Blob ? defragBlob(args[0]) : defrag(1, ...args),
+  defragSong: (...args) => args[0] instanceof Blob ? defragBlob(args[0], args[1]) : defrag(1, ...args),
 };
 self.onmessage = async ({ data: { id, method, args } }) => {
   try {

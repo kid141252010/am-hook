@@ -338,11 +338,11 @@
     }
 
     /** 把 fMP4 解碎片到同目录新文件并删除 fMP4，返回最终 File */
-    async defrag(signal) {
+    async defrag(signal, tags) {
       const input = this.name;
       this.output = input.replace(/\.m4a$/, '-defrag.m4a');
       try {
-        await defragInWorker([input, this.output, OPFS_DIR], signal);
+        await defragInWorker([input, this.output, OPFS_DIR, tags], signal);
       } finally {
         await removeOpfsFile(input);
       }
@@ -384,10 +384,10 @@
     }
 
     /** 无 OPFS 时 Worker 直接读 Blob、返回新 Blob */
-    defrag(signal) {
+    defrag(signal, tags) {
       const blob = this.blob;
       this.blob = null;
-      return defragInWorker([blob], signal);
+      return defragInWorker([blob, tags], signal);
     }
 
     abort() {
@@ -436,7 +436,7 @@
    * 返回 { file, storage: 'opfs' | 'memory', size, dispose }：由页面保存 file，
    * 不再需要时调用 dispose() 删除 OPFS 临时文件并释放 Web Lock。
    */
-  async function download(track, { signal, onProgress, onDefrag } = {}) {
+  async function download(track, { signal, onProgress, onDefrag, tags } = {}) {
     const ctl = new AbortController();
     const onAbort = () => ctl.abort(signal.reason);
     if (signal) {
@@ -466,7 +466,7 @@
       })));
       await sink.finish();
       if (onDefrag) onDefrag();
-      const file = await sink.defrag(ctl.signal);
+      const file = await sink.defrag(ctl.signal, tags);
       return { file, storage: sink.kind, size: file.size, dispose: () => sink.cleanup() };
     } catch (err) {
       ctl.abort(err);
