@@ -10,3 +10,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 am-media = { path = "../am-media" }
+serde_json = "1"

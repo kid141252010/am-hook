@@ -95,6 +95,8 @@ dependencies = [
  "aes",
  "p256",
  "rand_core 0.6.4",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
@@ -103,6 +105,7 @@ name = "am-media-wasm"
 version = "0.1.0"
 dependencies = [
  "am-media",
+ "serde_json",
 ]
 
 [[package]]
