@@ -203,6 +203,57 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
   }
 
   /* ---------- 浏览器端下载：直连 CDN + wasm 解密 + OPFS 暂存 ---------- */
+  /* ---------- 元数据标签偏好（localStorage `am-hook:tags`，与 /assets/tags.js 同 key） ---------- */
+  const tagsPrefs = { enabled: true, cover: true, lyrics: true, itunesIds: true };
+  try { Object.assign(tagsPrefs, JSON.parse(localStorage.getItem('am-hook:tags') || '{}')); } catch { /* 保持默认 */ }
+  function saveTagsPrefs() { try { localStorage.setItem('am-hook:tags', JSON.stringify(tagsPrefs)); } catch { /* 忽略 */ } }
+
+  /** 组装本次下载的元数据标签：3000px 封面与歌词并行拉取，任一失败都不阻塞下载；用户关闭写入时返回 undefined。 */
+  async function buildDownloadTags(signal) {
+    const { buildSongTags, artwork3000, fetchJpegBytes, fetchLyricsText } = await import('/assets/tags.js');
+    const prefs = tagsPrefs;
+    if (!prefs.enabled) return undefined;
+    const [cover, lyrics] = await Promise.all([
+      (prefs.cover && meta.artworkTemplate) ? fetchJpegBytes(artwork3000(meta.artworkTemplate)) : null,
+      prefs.lyrics ? fetchLyricsText(adamId) : null,
+    ]);
+    signal?.throwIfAborted();
+    const json = buildSongTags({ ...meta, id: adamId }, {
+      coverFormat: cover ? 'jpeg' : null,
+      includeItunesIds: prefs.itunesIds,
+      lyrics,
+    });
+    return { json, cover };
+  }
+
+  /** 下载菜单中的「写入元数据」复选框组：主开关 + 嵌入封面 / 写入歌词 / iTunes ID 三个子选项。 */
+  function tagsMenuSection() {
+    const wrap = el('div', { className: 'menu-tags' });
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', t('dl.tags'));
+    const boxes = {};
+    const sync = () => {
+      boxes.cover.disabled = boxes.lyrics.disabled = boxes.itunesIds.disabled = !tagsPrefs.enabled;
+      wrap.classList.toggle('off', !tagsPrefs.enabled);
+    };
+    const row = (key, labelKey, sub) => {
+      const box = el('input', { type: 'checkbox', className: 'menu-check-box' });
+      box.checked = !!tagsPrefs[key];
+      if (sub) box.disabled = !tagsPrefs.enabled;
+      box.addEventListener('change', () => { tagsPrefs[key] = box.checked; saveTagsPrefs(); sync(); });
+      boxes[key] = box;
+      return el('label', { className: 'menu-check' + (sub ? ' sub' : '') }, box, el('span', { textContent: t(labelKey) }));
+    };
+    wrap.append(
+      row('enabled', 'dl.tags', false),
+      row('cover', 'dl.tagsCover', true),
+      row('lyrics', 'dl.tagsLyrics', true),
+      row('itunesIds', 'dl.tagsItunesIds', true),
+    );
+    sync();
+    return wrap;
+  }
+
   async function startDownload(v, fileName) {
     const id = v.group_id;
     if (downloads.has(id)) { toast(t('dl.busy')); return; }
@@ -214,10 +265,13 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
       const track = await AmDecrypt.openTrack(v.m3u8Url, job.ctl.signal);
       job.total = track.size;
       showDownload(id);
+      // 元数据标签（用户关闭写入时为 undefined，透传后由 media-worker 决定调哪个 wasm 导出）
+      const tags = await buildDownloadTags(job.ctl.signal);
       const result = await AmDecrypt.download(track, {
         signal: job.ctl.signal,
         onProgress: (done) => { job.done = done; showDownload(id); },
         onDefrag: () => { job.defrag = true; showDownload(id); },
+        tags,
       });
       saveResult(result, fileName);
       toast(t('dl.done', { size: formatSize(result.size) }));
@@ -396,6 +450,7 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
   function variantMenu(v, fileName) {
     const items = [
       { icon: ICON.download, label: t('menu.download'), hint: t('menu.downloadHint', { file: fileName }), onSelect: () => startDownload(v, fileName) },
+      tagsMenuSection(),
     ];
     if (hook) {
       items.push(
@@ -573,6 +628,15 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
           durationMs: a.durationInMillis,
           explicit: a.contentRating === 'explicit',
           url: a.url || '',
+          // 以下字段供下载时组装元数据标签（/assets/tags.js）
+          artworkTemplate: a.artwork?.url || '',
+          trackNumber: a.trackNumber,
+          discNumber: a.discNumber,
+          trackCount: song.relationships?.albums?.data?.[0]?.attributes?.trackCount,
+          discCount: song.relationships?.albums?.data?.[0]?.attributes?.discCount,
+          composerName: a.composerName || '',
+          isrc: a.isrc || '',
+          copyright: a.copyright || '',
           // 加入资料库、歌单时用来生成曲目快照
           resource: song,
         };

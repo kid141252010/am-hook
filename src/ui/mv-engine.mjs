@@ -212,7 +212,7 @@ export async function collectGarbage() {
     for (const name of garbage) await root.removeEntry(name).catch(() => {});
   } catch { /* best effort */ }
 }
-export async function downloadMV(id, video, audio, { signal, onProgress, onDefrag }) {
+export async function downloadMV(id, video, audio, { signal, onProgress, onDefrag, tags }) { // tags: { json: string, cover: Uint8Array | null } | undefined, forwarded to the media worker's defrag
   if (!navigator.storage?.getDirectory) throw new Error('OPFS requires HTTPS or localhost and a supported browser');
   await collectGarbage();
   const root = await navigator.storage.getDirectory();
@@ -245,7 +245,7 @@ export async function downloadMV(id, video, audio, { signal, onProgress, onDefra
     signal.throwIfAborted(); await writer.close(); writer = null;
     // Rewrite the interleaved fragments as a progressive MP4 (ftyp, moov, mdat).
     onDefrag?.();
-    await core.call('defrag', fragmented, name);
+    await core.call('defrag', fragmented, name, tags); // media-worker defrag(input, output, tags): tags present -> media_defrag_tags
     signal.throwIfAborted();
     const file = await (await root.getFileHandle(name)).getFile(); complete = true;
     return { file, dispose: () => remove(root, name).finally(unlock) };

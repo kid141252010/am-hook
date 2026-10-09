@@ -43,6 +43,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/assets/motion-art.mjs", get(ui::motion_art_handler))
         .route("/assets/player.js", get(ui::player_js_handler))
         .route("/assets/i18n.js", get(ui::i18n_js_handler))
+        .route("/assets/tags.js", get(ui::tags_js_handler))
         .route("/assets/decrypt.js", get(ui::decrypt_js_handler))
         .route("/assets/hook-worker.js", get(ui::worker_js_handler))
         .route("/assets/hook.wasm", get(ui::wasm_handler))
