@@ -1,5 +1,46 @@
 # CHANGELOG
 
+## v0.3.2 (2026-10-10)
+
+### New
+- ✨ Deployable to a serverless platform (Vercel or Cloudflare Workers) without running the binary; the README has one-click deploy buttons
+  - The platform hosts the static assets and the backend is a single function (`serverless/core.mjs`): the amp-api catalog proxy and the MV master fetch; amp-api responses are cached by the platform
+  - By default the browser talks to your own wrapper-lite directly (local mode); set the `AM_HOOK_WRAPPER_URL` environment variable (and optionally `AM_HOOK_WRAPPER_AUTH`) to have the function relay instead, without rate or concurrency limits, so restrict access with the platform's access control
+  - `node scripts/build-static.mjs` builds `dist/` from the asset table in `src/assets.rs`; the build needs only Node
+
+### Changed
+- New `/assets/host.js` tells the page whether the server can relay wrapper-lite; when it cannot, the "wrapper-lite" setting only offers "Local". The binary behaves as before
+
+## v0.3.1 (2026-10-09)
+
+### Changed
+- Code quality pass with no functional change: `cargo clippy --workspace --all-targets -- -D warnings` is warning-free and now runs in CI
+  - Embedded front-end assets are registered from a single table in `src/assets.rs`; unknown `/assets/views|lyrics|mv/*` paths now return a plain-text 404, and MV JS / CSS responses carry `charset=utf-8`
+  - `src/m3u8.rs` is renamed `src/links.rs` (it only handles links and page paths), and shares its path regex fragments with the request log
+  - temari's FFI exports are `unsafe extern "C"` with `# Safety` docs (C ABI unchanged)
+
+### Bug Fixes
+- 🐛 temari panicked when a `\u` escape in JSON was followed by a multi-byte character (surfaced as NULL over FFI); the escape is now ignored
+
+## v0.3.0 (2026-10-09)
+
+### New
+- ✨ The web page can use your own local wrapper-lite: switch the "wrapper-lite" setting at the bottom of the navigation to "Local" and the browser sends wrapper-lite requests itself
+  - URL, max requests per second, max concurrent requests and `Authorization` are configurable and saved in the browser
+  - The URL may carry credentials (such as `https://<token>@host`), sent as `Authorization: Basic …` as with `--wrapper-url`
+  - The wrapper-lite must allow cross-origin requests, or install a browser extension that lifts CORS restrictions
+  - MV master playlists are still fetched by the server with `User-Agent: AM` (new `/parse/mv-master` endpoint) so 4K stays available
+
+### Changed
+- The song master m3u8 is now fetched and parsed in the browser; `/parse/song/<adamId>` returns only the master URL (`{"code":0,"data":{"masterUrl":…}}`) instead of `variants`
+
+## v0.2.7 (2026-10-09)
+
+### Removed
+- 🗑️ The `--hook` server-side decrypting proxy; decryption now happens only in the browser
+  - The `--hook`, `--cache-ttl`, `--lru-cache-mb`, `--prefetch` and `--template-timeout` flags are gone; remove them from startup scripts
+  - The song page no longer offers external players, Copy URL or download via server; the built-in player no longer uses native HLS or a direct media file
+
 ## v0.2.6 (2026-10-07)
 
 ### Bug Fixes

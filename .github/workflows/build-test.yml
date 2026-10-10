@@ -22,6 +22,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -44,8 +46,18 @@ jobs:
       - name: Check
         run: cargo check --verbose
 
+      - name: Clippy
+        # 只在 Linux 跑一次：lint 结果与平台无关，stable 新增 lint 时也只需要看一处
+        if: runner.os == 'Linux'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Build
         run: cargo build --verbose
 
       - name: Run offline tests
         run: cargo test --workspace --verbose
+
+      - name: Run serverless tests
+        # serverless 后端（Vercel / Cloudflare）与 dist/ 的生成，只需要 runner 自带的 Node
+        if: runner.os == 'Linux'
+        run: node --test tests/serverless.mjs
