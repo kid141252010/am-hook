@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "am-hook"
-version = "0.2.6"
+version = "0.3.2"
 dependencies = [
  "am-mp4",
  "axum",
@@ -82,7 +82,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "temari",
  "tokio",
  "tracing",
  "tracing-subscriber",

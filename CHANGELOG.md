@@ -1,5 +1,46 @@
 # 更新日志
 
+## v0.3.2 (2026-10-10)
+
+### 新功能
+- ✨ 可以部署到 serverless 平台（Vercel 或 Cloudflare Workers），不需要运行二进制，README 里有一键部署按钮
+  - 静态资源由平台托管，后端只有一个函数（`serverless/core.mjs`）：amp-api 目录代理与 MV master 获取；amp-api 响应由平台缓存
+  - 默认由浏览器直连你自己的 wrapper-lite（本地模式）；设置环境变量 `AM_HOOK_WRAPPER_URL`（可另设 `AM_HOOK_WRAPPER_AUTH`）后由函数转发，此时没有限速与限并发，请用平台的访问控制限制访问
+  - `node scripts/build-static.mjs` 按 `src/assets.rs` 的资源表生成 `dist/`，构建只需要 Node
+
+### 变更
+- 新增 `/assets/host.js`，告诉页面服务端能否转发 wrapper-lite；不能时「wrapper-lite」设置里只有「本地」。二进制的行为不变
+
+## v0.3.1 (2026-10-09)
+
+### 变更
+- 代码质量整理，无功能变化：`cargo clippy --workspace --all-targets -- -D warnings` 零警告，并加入 CI
+  - 内嵌前端资源改由 `src/assets.rs` 的一张表统一注册路由；未知的 `/assets/views|lyrics|mv/*` 现在返回纯文本 404，MV 的 JS / CSS 响应带 `charset=utf-8`
+  - `src/m3u8.rs` 改名为 `src/links.rs`（实际只做链接与页面路径判定），`links.rs` 与请求日志共用同一份路径正则片段
+  - temari 的 FFI 导出函数标为 `unsafe extern "C"` 并补充 `# Safety` 文档（C ABI 不变）
+
+### 修复
+- 🐛 temari 解析 JSON 时，`\u` 转义后紧跟多字节字符会 panic（FFI 中表现为返回 NULL），现在按无效转义忽略
+
+## v0.3.0 (2026-10-09)
+
+### 新功能
+- ✨ 网页可以改用自己本地的 wrapper-lite：导航底部的「wrapper-lite」设置切换为「本地」后，wrapper-lite 请求由浏览器直接发出
+  - 可设置地址、每秒请求数上限、同时请求数上限与 `Authorization`，保存在浏览器中
+  - 地址可以带用户信息（如 `https://<token>@host`），与 `--wrapper-url` 相同，转为 `Authorization: Basic …` 发送
+  - wrapper-lite 需允许跨源请求，或在浏览器中安装解除跨域限制的插件
+  - MV 的 master 播放列表仍由服务端以 `User-Agent: AM` 获取（新接口 `/parse/mv-master`），避免拿不到 4K
+
+### 变更
+- 歌曲 master m3u8 改由浏览器获取并解析，`/parse/song/<adamId>` 只返回 master 地址（`{"code":0,"data":{"masterUrl":…}}`），不再返回 `variants`
+
+## v0.2.7 (2026-10-09)
+
+### 移除
+- 🗑️ 移除 `--hook` 服务端解密代理，解密只在浏览器中进行
+  - 同时移除 `--hook`、`--cache-ttl`、`--lru-cache-mb`、`--prefetch`、`--template-timeout` 参数，启动脚本中仍带有这些参数时需要删除
+  - 歌曲页不再提供外部播放器、复制地址与通过服务器下载；内置播放器不再使用原生 HLS / 直连播放
+
 ## v0.2.6 (2026-10-07)
 
 ### 修复
