@@ -3,6 +3,7 @@
 // 与官网相同，assetTokens 中的各个未加密 MP4 由 <video> 直接播放，下载时原样保存，没有音频轨道可选
 import { parseMaster, recommendedAudio } from '/assets/mv/hls.mjs';
 import { fetchMaster, Playback, DirectPlayback, downloadMV, downloadDirect, mime, collectGarbage } from '/assets/mv/engine.mjs';
+import { loadTagsPrefs, saveTagsPrefs } from '/assets/tags.js';
 const { t } = AmI18n;
 
 export const bodyClass = 'mv-body';
@@ -254,12 +255,11 @@ export function mount({ root, url, signal, player: music, onLangChange }) {
     finally { busy = false; controls(); }
   };
   /* ---------- 元数据标签偏好（与歌曲页共用 localStorage `am-hook:tags`；MV 不写歌词因为字幕已内嵌） ---------- */
-  const tagsPrefs = { enabled: true, cover: true, lyrics: true, itunesIds: true };
-  try { Object.assign(tagsPrefs, JSON.parse(localStorage.getItem('am-hook:tags') || '{}')); } catch { /* 保持默认 */ }
-  function saveTagsPrefs() { try { localStorage.setItem('am-hook:tags', JSON.stringify(tagsPrefs)); } catch { /* 忽略 */ } }
+  const tagsPrefs = loadTagsPrefs();
   function renderTagsPrefs() {
     const box = $('mv-tags');
     if (!box) return;
+    if (post) { box.hidden = true; box.replaceChildren(); return; }
     box.hidden = false;
     const row = (key, textKey, sub) => {
       const label = document.createElement('label');
@@ -268,7 +268,7 @@ export function mount({ root, url, signal, player: music, onLangChange }) {
       input.type = 'checkbox';
       input.checked = !!tagsPrefs[key];
       input.disabled = !!sub && !tagsPrefs.enabled;
-      input.addEventListener('change', () => { tagsPrefs[key] = input.checked; saveTagsPrefs(); renderTagsPrefs(); });
+      input.addEventListener('change', () => { tagsPrefs[key] = input.checked; saveTagsPrefs(tagsPrefs); renderTagsPrefs(); });
       label.append(input, document.createTextNode(t(textKey)));
       return label;
     };
@@ -290,7 +290,7 @@ export function mount({ root, url, signal, player: music, onLangChange }) {
       let tags;
       if (!post && tagsPrefs.enabled) {
         const { buildMvTags, artwork3000, fetchJpegBytes } = await import('/assets/tags.js');
-        const cover = (tagsPrefs.cover && mvMeta?.artworkTemplate) ? await fetchJpegBytes(artwork3000(mvMeta.artworkTemplate)) : null;
+        const cover = (tagsPrefs.cover && mvMeta?.artworkTemplate) ? await fetchJpegBytes(artwork3000(mvMeta.artworkTemplate), { signal: downloadController.signal }) : null;
         tags = {
           json: buildMvTags(mvMeta || { id }, { coverFormat: cover ? 'jpeg' : null, includeItunesIds: tagsPrefs.itunesIds }),
           cover,

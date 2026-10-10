@@ -144,6 +144,7 @@
 .mv-page progress::-moz-progress-bar { background: var(--accent); }
 .mv-dock .hint { margin-top: 12px; font-size: 11px; line-height: 1.6; }
 .mv-tags{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.mv-tags[hidden]{display:none}
 .mv-check{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text);cursor:pointer}
 .mv-check input{accent-color:var(--accent);width:15px;height:15px;margin:0}
 .mv-check.sub{color:var(--muted)}

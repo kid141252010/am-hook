@@ -1170,7 +1170,7 @@ mod tests {
 
         let (ty, val) = data_value(&item_payload(b"trkn"));
         assert_eq!(ty, 0);
-        assert_eq!(val, vec![0, 0, 0, 3, 0, 0, 0, 12]);
+        assert_eq!(val, vec![0, 0, 0, 3, 0, 12, 0, 0]);
 
         let (ty, _) = data_value(&item_payload(b"covr"));
         assert_eq!(ty, 13);

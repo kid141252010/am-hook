@@ -1,5 +1,6 @@
 // 歌曲页（/https://music.apple.com/{cc}/song/{slug}/{id}），由 app.mjs 挂载
 import { createActions, targetOf } from './actions.mjs';
+import { loadTagsPrefs, saveTagsPrefs } from '/assets/tags.js';
 
 const { detectMode, artistNodes, qualityBadge, qualityIcon, formatTime } = window.AmHook;
 const { AmDecrypt, AmI18n } = window;
@@ -204,9 +205,7 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
 
   /* ---------- 浏览器端下载：直连 CDN + wasm 解密 + OPFS 暂存 ---------- */
   /* ---------- 元数据标签偏好（localStorage `am-hook:tags`，与 /assets/tags.js 同 key） ---------- */
-  const tagsPrefs = { enabled: true, cover: true, lyrics: true, itunesIds: true };
-  try { Object.assign(tagsPrefs, JSON.parse(localStorage.getItem('am-hook:tags') || '{}')); } catch { /* 保持默认 */ }
-  function saveTagsPrefs() { try { localStorage.setItem('am-hook:tags', JSON.stringify(tagsPrefs)); } catch { /* 忽略 */ } }
+  const tagsPrefs = loadTagsPrefs();
 
   /** 组装本次下载的元数据标签：3000px 封面与歌词并行拉取，任一失败都不阻塞下载；用户关闭写入时返回 undefined。 */
   async function buildDownloadTags(signal) {
@@ -214,8 +213,8 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
     const prefs = tagsPrefs;
     if (!prefs.enabled) return undefined;
     const [cover, lyrics] = await Promise.all([
-      (prefs.cover && meta.artworkTemplate) ? fetchJpegBytes(artwork3000(meta.artworkTemplate)) : null,
-      prefs.lyrics ? fetchLyricsText(adamId) : null,
+      (prefs.cover && meta.artworkTemplate) ? fetchJpegBytes(artwork3000(meta.artworkTemplate), { signal }) : null,
+      prefs.lyrics ? fetchLyricsText(adamId, { signal }) : null,
     ]);
     signal?.throwIfAborted();
     const json = buildSongTags({ ...meta, id: adamId }, {
@@ -239,8 +238,16 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
     const row = (key, labelKey, sub) => {
       const box = el('input', { type: 'checkbox', className: 'menu-check-box' });
       box.checked = !!tagsPrefs[key];
+      box.tabIndex = -1;
+      box.setAttribute('role', 'menuitemcheckbox');
+      box.setAttribute('aria-checked', String(box.checked));
       if (sub) box.disabled = !tagsPrefs.enabled;
-      box.addEventListener('change', () => { tagsPrefs[key] = box.checked; saveTagsPrefs(); sync(); });
+      box.addEventListener('change', () => {
+        tagsPrefs[key] = box.checked;
+        box.setAttribute('aria-checked', String(box.checked));
+        saveTagsPrefs(tagsPrefs);
+        sync();
+      });
       boxes[key] = box;
       return el('label', { className: 'menu-check' + (sub ? ' sub' : '') }, box, el('span', { textContent: t(labelKey) }));
     };
@@ -315,7 +322,8 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
 
   /** 可聚焦的菜单项（跳过折叠中的） */
   function menuItems() {
-    return [...menu.el.querySelectorAll('[role="menuitem"]')].filter((n) => !n.closest('[hidden]'));
+    return [...menu.el.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')]
+      .filter((n) => !n.closest('[hidden]') && !n.disabled);
   }
 
   /** items：'-' 分隔线、现成的 DOM 节点，或 { icon, label, hint, href?, download?, onSelect? } */
@@ -434,7 +442,13 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
     else if (e.key === 'Home') go(0);
     else if (e.key === 'End') go(items.length - 1);
     else if (e.key === 'Escape') { e.preventDefault(); closeMenu(true); }
-    else if (e.key === 'Tab') closeMenu(false);
+    else if (e.key === 'Tab') {
+      const next = e.shiftKey ? items[i - 1] : items[i + 1];
+      if (next) { e.preventDefault(); next.focus(); }
+      else closeMenu(false);
+    } else if ((e.key === ' ' || e.key === 'Enter') && document.activeElement?.matches('[role="menuitemcheckbox"]')) {
+      e.preventDefault(); document.activeElement.click();
+    }
   });
   document.addEventListener('pointerdown', (e) => {
     if (menu.trigger && !menu.el.contains(e.target) && !menu.trigger.contains(e.target)) closeMenu(false);

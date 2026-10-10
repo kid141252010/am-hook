@@ -133,15 +133,24 @@ fn u64_item(key: &FourCC, value: u64) -> Atom {
     item(key, vec![data_box(DATA_TYPE_BINARY, &value.to_be_bytes())])
 }
 
-fn pair_item(key: &FourCC, number: Option<u16>, total: Option<u16>) -> Option<Atom> {
+fn pair_item(
+    key: &FourCC,
+    number: Option<u16>,
+    total: Option<u16>,
+    trailing_zero: bool,
+) -> Option<Atom> {
     let n = number.unwrap_or(0);
     let t = total.unwrap_or(0);
     if n == 0 && t == 0 {
         return None;
     }
-    let mut value = [0u8; 8];
-    value[2..4].copy_from_slice(&n.to_be_bytes());
-    value[6..8].copy_from_slice(&t.to_be_bytes());
+    let mut value = Vec::with_capacity(if trailing_zero { 8 } else { 6 });
+    value.extend_from_slice(&0u16.to_be_bytes());
+    value.extend_from_slice(&n.to_be_bytes());
+    value.extend_from_slice(&t.to_be_bytes());
+    if trailing_zero {
+        value.extend_from_slice(&0u16.to_be_bytes());
+    }
     Some(item(key, vec![data_box(DATA_TYPE_BINARY, &value)]))
 }
 
@@ -192,7 +201,7 @@ impl Tags {
         if let Some(atom) = text_item_owned(&KEY_RELEASE_DATE, &self.release_date) {
             atoms.push(atom);
         }
-        if let Some(atom) = pair_item(&KEY_DISC, self.disc_number, self.disc_total) {
+        if let Some(atom) = pair_item(&KEY_DISC, self.disc_number, self.disc_total, false) {
             atoms.push(atom);
         }
         if let Some(gapless) = self.gapless {
@@ -225,7 +234,7 @@ impl Tags {
         if let Some(atom) = text_item_owned(&KEY_SORT_TITLE, &self.sort_title) {
             atoms.push(atom);
         }
-        if let Some(atom) = pair_item(&KEY_TRACK, self.track_number, self.track_total) {
+        if let Some(atom) = pair_item(&KEY_TRACK, self.track_number, self.track_total, true) {
             atoms.push(atom);
         }
         if let Some(atom) = text_item_owned(&KEY_XID, &self.xid) {
@@ -294,7 +303,24 @@ mod tests {
         let (dt, locale, value) = read_data_box(&children[0].1);
         assert_eq!(dt, 0);
         assert_eq!(locale, 0);
-        assert_eq!(value, &[0, 0, 0, 3, 0, 0, 0, 12]);
+        assert_eq!(value, &[0, 0, 0, 3, 0, 12, 0, 0]);
+    }
+
+    #[test]
+    fn disk_encoding() {
+        let tags = Tags {
+            disc_number: Some(1),
+            disc_total: Some(2),
+            ..Default::default()
+        };
+        let atoms = tags.to_ilst();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].kind, KEY_DISC);
+        let children = child_payloads(&atoms[0]);
+        let (dt, locale, value) = read_data_box(&children[0].1);
+        assert_eq!(dt, 0);
+        assert_eq!(locale, 0);
+        assert_eq!(value, &[0, 0, 0, 1, 0, 2]);
     }
 
     #[test]

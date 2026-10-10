@@ -48,26 +48,46 @@ export function artwork3000(template) {
     .replace(/\{f\}/g, 'jpg');
 }
 
-export async function fetchBytes(url) {
+function requestSignal(signal, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    },
+  };
+}
+
+export async function fetchBytes(url, { signal, timeoutMs } = {}) {
+  const request = requestSignal(signal, timeoutMs);
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: request.signal });
     if (!res || !res.ok) return null;
     return new Uint8Array(await res.arrayBuffer());
   } catch {
+    if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
     return null;
+  } finally {
+    request.cleanup();
   }
 }
 
 /** 拉封面专用：只接受 JPEG（FF D8 魔数），否则返回 null 让调用方跳过 covr。 */
-export async function fetchJpegBytes(url) {
-  const bytes = await fetchBytes(url);
+export async function fetchJpegBytes(url, options) {
+  const bytes = await fetchBytes(url, options);
   if (!bytes || bytes.length < 2 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
   return bytes;
 }
 
-export async function fetchLyricsText(adamId) {
+export async function fetchLyricsText(adamId, { signal, timeoutMs } = {}) {
+  const request = requestSignal(signal, timeoutMs);
   try {
-    const res = await fetch(`/lyrics/${encodeURIComponent(adamId)}`);
+    const res = await fetch(`/lyrics/${encodeURIComponent(adamId)}`, { signal: request.signal });
     if (!res || !res.ok) return null;
     const body = await res.text();
     if (!body) return null;
@@ -80,7 +100,10 @@ export async function fetchLyricsText(adamId) {
       .join('\n');
     return text || null;
   } catch {
+    if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
     return null;
+  } finally {
+    request.cleanup();
   }
 }
 
