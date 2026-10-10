@@ -1,5 +1,6 @@
 // 歌曲页（/https://music.apple.com/{cc}/song/{slug}/{id}），由 app.mjs 挂载
 import { createActions, targetOf } from './actions.mjs';
+import { loadTagsPrefs, saveTagsPrefs } from '/assets/tags.js';
 
 const { detectMode, artistNodes, qualityBadge, qualityIcon, formatTime } = window.AmHook;
 const { AmDecrypt, AmI18n, AmWrapper } = window;
@@ -136,6 +137,63 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
   }
 
   /* ---------- 浏览器端下载：直连 CDN + wasm 解密 + OPFS 暂存 ---------- */
+  /* ---------- 元数据标签偏好（localStorage `am-hook:tags`，与 /assets/tags.js 同 key） ---------- */
+  const tagsPrefs = loadTagsPrefs();
+
+  /** 组装本次下载的元数据标签：3000px 封面与歌词并行拉取，任一失败都不阻塞下载；用户关闭写入时返回 undefined。 */
+  async function buildDownloadTags(signal) {
+    const { buildSongTags, artwork3000, fetchJpegBytes, fetchLyricsText } = await import('/assets/tags.js');
+    const prefs = tagsPrefs;
+    if (!prefs.enabled) return undefined;
+    const [cover, lyrics] = await Promise.all([
+      (prefs.cover && meta.artworkTemplate) ? fetchJpegBytes(artwork3000(meta.artworkTemplate), { signal }) : null,
+      prefs.lyrics ? fetchLyricsText(adamId, { signal }) : null,
+    ]);
+    signal?.throwIfAborted();
+    const json = buildSongTags({ ...meta, id: adamId }, {
+      coverFormat: cover ? 'jpeg' : null,
+      includeItunesIds: prefs.itunesIds,
+      lyrics,
+    });
+    return { json, cover };
+  }
+
+  /** 下载菜单中的「写入元数据」复选框组：主开关 + 嵌入封面 / 写入歌词 / iTunes ID 三个子选项。 */
+  function tagsMenuSection() {
+    const wrap = el('div', { className: 'menu-tags' });
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', t('dl.tags'));
+    const boxes = {};
+    const sync = () => {
+      boxes.cover.disabled = boxes.lyrics.disabled = boxes.itunesIds.disabled = !tagsPrefs.enabled;
+      wrap.classList.toggle('off', !tagsPrefs.enabled);
+    };
+    const row = (key, labelKey, sub) => {
+      const box = el('input', { type: 'checkbox', className: 'menu-check-box' });
+      box.checked = !!tagsPrefs[key];
+      box.tabIndex = -1;
+      box.setAttribute('role', 'menuitemcheckbox');
+      box.setAttribute('aria-checked', String(box.checked));
+      if (sub) box.disabled = !tagsPrefs.enabled;
+      box.addEventListener('change', () => {
+        tagsPrefs[key] = box.checked;
+        box.setAttribute('aria-checked', String(box.checked));
+        saveTagsPrefs(tagsPrefs);
+        sync();
+      });
+      boxes[key] = box;
+      return el('label', { className: 'menu-check' + (sub ? ' sub' : '') }, box, el('span', { textContent: t(labelKey) }));
+    };
+    wrap.append(
+      row('enabled', 'dl.tags', false),
+      row('cover', 'dl.tagsCover', true),
+      row('lyrics', 'dl.tagsLyrics', true),
+      row('itunesIds', 'dl.tagsItunesIds', true),
+    );
+    sync();
+    return wrap;
+  }
+
   async function startDownload(v, fileName) {
     const id = v.group_id;
     if (downloads.has(id)) { toast(t('dl.busy')); return; }
@@ -147,10 +205,13 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
       const track = await AmDecrypt.openTrack(v.m3u8Url, job.ctl.signal);
       job.total = track.size;
       showDownload(id);
+      // 元数据标签（用户关闭写入时为 undefined，透传后由 media-worker 决定调哪个 wasm 导出）
+      const tags = await buildDownloadTags(job.ctl.signal);
       const result = await AmDecrypt.download(track, {
         signal: job.ctl.signal,
         onProgress: (done) => { job.done = done; showDownload(id); },
         onDefrag: () => { job.defrag = true; showDownload(id); },
+        tags,
       });
       saveResult(result, fileName);
       toast(t('dl.done', { size: formatSize(result.size) }));
@@ -194,7 +255,8 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
 
   /** 可聚焦的菜单项（跳过折叠中的） */
   function menuItems() {
-    return [...menu.el.querySelectorAll('[role="menuitem"]')].filter((n) => !n.closest('[hidden]'));
+    return [...menu.el.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')]
+      .filter((n) => !n.closest('[hidden]') && !n.disabled);
   }
 
   /** items：'-' 分隔线、现成的 DOM 节点，或 { icon, label, hint, href?, download?, onSelect? } */
@@ -257,7 +319,13 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
     else if (e.key === 'Home') go(0);
     else if (e.key === 'End') go(items.length - 1);
     else if (e.key === 'Escape') { e.preventDefault(); closeMenu(true); }
-    else if (e.key === 'Tab') closeMenu(false);
+    else if (e.key === 'Tab') {
+      const next = e.shiftKey ? items[i - 1] : items[i + 1];
+      if (next) { e.preventDefault(); next.focus(); }
+      else closeMenu(false);
+    } else if ((e.key === ' ' || e.key === 'Enter') && document.activeElement?.matches('[role="menuitemcheckbox"]')) {
+      e.preventDefault(); document.activeElement.click();
+    }
   });
   document.addEventListener('pointerdown', (e) => {
     if (menu.trigger && !menu.el.contains(e.target) && !menu.trigger.contains(e.target)) closeMenu(false);
@@ -273,6 +341,7 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
   function variantMenu(v, fileName) {
     return [
       { icon: ICON.download, label: t('menu.download'), hint: t('menu.downloadHint', { file: fileName }), onSelect: () => startDownload(v, fileName) },
+      tagsMenuSection(),
     ];
   }
 
@@ -426,6 +495,15 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
           durationMs: a.durationInMillis,
           explicit: a.contentRating === 'explicit',
           url: a.url || '',
+          // 以下字段供下载时组装元数据标签（/assets/tags.js）
+          artworkTemplate: a.artwork?.url || '',
+          trackNumber: a.trackNumber,
+          discNumber: a.discNumber,
+          trackCount: song.relationships?.albums?.data?.[0]?.attributes?.trackCount,
+          discCount: song.relationships?.albums?.data?.[0]?.attributes?.discCount,
+          composerName: a.composerName || '',
+          isrc: a.isrc || '',
+          copyright: a.copyright || '',
           // 加入资料库、歌单时用来生成曲目快照
           resource: song,
         };

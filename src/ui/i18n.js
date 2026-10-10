@@ -399,6 +399,10 @@
       'dl.done': '解密完成，已交给浏览器保存（{size}）',
       'dl.cancelled': '已取消下载',
       'dl.failed': '下载失败：{msg}',
+      'dl.tags': '写入元数据',
+      'dl.tagsCover': '嵌入封面',
+      'dl.tagsLyrics': '写入歌词 ©lyr',
+      'dl.tagsItunesIds': 'iTunes ID',
 
       'player.previous': '上一首',
       'player.next': '下一首',
@@ -855,6 +859,10 @@
       'dl.done': 'Decrypted and handed to the browser to save ({size})',
       'dl.cancelled': 'Download cancelled',
       'dl.failed': 'Download failed: {msg}',
+      'dl.tags': 'Write metadata tags',
+      'dl.tagsCover': 'Embed cover art',
+      'dl.tagsLyrics': 'Write lyrics (©lyr)',
+      'dl.tagsItunesIds': 'iTunes IDs',
 
       'player.previous': 'Previous',
       'player.next': 'Next',

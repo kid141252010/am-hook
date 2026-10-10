@@ -3,6 +3,7 @@
 // 与官网相同，assetTokens 中的各个未加密 MP4 由 <video> 直接播放，下载时原样保存，没有音频轨道可选
 import { parseMaster, recommendedAudio } from '/assets/mv/hls.mjs';
 import { fetchMaster, Playback, DirectPlayback, downloadMV, downloadDirect, mime, collectGarbage } from '/assets/mv/engine.mjs';
+import { loadTagsPrefs, saveTagsPrefs } from '/assets/tags.js';
 const { t } = AmI18n;
 
 export const bodyClass = 'mv-body';
@@ -18,6 +19,7 @@ export function mount({ root, url, signal, player: music, onLangChange }) {
   const [, country = 'us', id] = postMatch || url.pathname.match(/^\/https:\/\/music\.apple\.com\/([a-z]{2})\/music-video\/[^/]+\/(\d+)\/?$/) || [];
   let master, selectedVideo, selectedAudio, playback, downloadController, result, resultUrl;
   let statusKey = 'mv.loading', statusVars, title = `MV ${id || ''}`, artist = '', busy = false;
+  let mvMeta = null;
   // 状态点颜色：进行中闪烁，完成为绿色，失败为红色
   const STATES = { 'mv.loading': 'loading', 'mv.license': 'busy', 'mv.buffering': 'busy', 'mv.downloading': 'busy', 'mv.defrag': 'busy',
     'mv.ready': 'idle', 'mv.playing': 'ok', 'mv.pressPlay': 'ok', 'mv.complete': 'ok', 'mv.failed': 'error' };
@@ -190,6 +192,15 @@ export function mount({ root, url, signal, player: music, onLangChange }) {
       if (!item || seq !== metadataSeq) return;
       // post 没有艺人，副标题为上传方（官网 subtitleLinks，如 Apple Music Presents）
       title = item.name || title; artist = (post ? item.uploadingBrandName : item.artistName) || '';
+      // 供下载时组装元数据标签（stik=6，不写歌词因为字幕已内嵌）
+      mvMeta = {
+        id,
+        title: item.name || '',
+        artist: (post ? item.uploadingBrandName : item.artistName) || '',
+        genre: item.genreNames?.[0] || '',
+        releaseDate: item.releaseDate || '',
+        artworkTemplate: item.artwork?.url || '',
+      };
       if (signal.aborted) return;
       $('title').textContent = title; document.title = `${title} · am-hook ${post ? 'Video' : 'MV'}`;
       if (post) $('artist').textContent = artist;
@@ -243,6 +254,28 @@ export function mount({ root, url, signal, player: music, onLangChange }) {
     catch (e) { session.stop(); if (playback === session) playback = null; if (e.name !== 'AbortError') error(e); }
     finally { busy = false; controls(); }
   };
+  /* ---------- 元数据标签偏好（与歌曲页共用 localStorage `am-hook:tags`；MV 不写歌词因为字幕已内嵌） ---------- */
+  const tagsPrefs = loadTagsPrefs();
+  function renderTagsPrefs() {
+    const box = $('mv-tags');
+    if (!box) return;
+    if (post) { box.hidden = true; box.replaceChildren(); return; }
+    box.hidden = false;
+    const row = (key, textKey, sub) => {
+      const label = document.createElement('label');
+      label.className = 'mv-check' + (sub ? ' sub' : '');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = !!tagsPrefs[key];
+      input.disabled = !!sub && !tagsPrefs.enabled;
+      input.addEventListener('change', () => { tagsPrefs[key] = input.checked; saveTagsPrefs(tagsPrefs); renderTagsPrefs(); });
+      label.append(input, document.createTextNode(t(textKey)));
+      return label;
+    };
+    box.replaceChildren(row('enabled', 'dl.tags'), row('cover', 'dl.tagsCover', true), row('itunesIds', 'dl.tagsItunesIds', true));
+    box.classList.toggle('off', !tagsPrefs.enabled);
+  }
+
   $('download').onclick = async () => {
     stopPlayback(); $('error').hidden = true; busy = true; controls(); status('mv.license');
     downloadController = new AbortController();
@@ -253,9 +286,19 @@ export function mount({ root, url, signal, player: music, onLangChange }) {
         $('progress').value = value; status('mv.downloading', { percent: Math.round(value * 100), size: (bytes / 1048576).toFixed(1) });
       };
       // post 的 MP4 未加密且已是标准 MP4（moov 在前），原样保存
+      // 元数据标签：3000px 封面拉取，失败则跳过 covr，不阻塞下载（post 不写标签）
+      let tags;
+      if (!post && tagsPrefs.enabled) {
+        const { buildMvTags, artwork3000, fetchJpegBytes } = await import('/assets/tags.js');
+        const cover = (tagsPrefs.cover && mvMeta?.artworkTemplate) ? await fetchJpegBytes(artwork3000(mvMeta.artworkTemplate), { signal: downloadController.signal }) : null;
+        tags = {
+          json: buildMvTags(mvMeta || { id }, { coverFormat: cover ? 'jpeg' : null, includeItunesIds: tagsPrefs.itunesIds }),
+          cover,
+        };
+      }
       result = post ? await downloadDirect(selectedVideo.url, { signal: downloadController.signal, onProgress })
         : await downloadMV(id, selectedVideo, selectedAudio, { signal: downloadController.signal, onProgress,
-          onDefrag: () => { $('progress').removeAttribute('value'); status('mv.defrag'); } });
+          onDefrag: () => { $('progress').removeAttribute('value'); status('mv.defrag'); }, tags });
       resultUrl = URL.createObjectURL(result.file); $('save').href = resultUrl;
       $('save').download = `${title} (${id}).mp4`.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
       $('save').hidden = false; $('save').click(); status('mv.complete');
@@ -272,7 +315,7 @@ export function mount({ root, url, signal, player: music, onLangChange }) {
   signal.addEventListener('abort', cleanup, { once: true });
   addEventListener('pagehide', cleanup, { signal });
   // 切换语言：标题等由 amp-api 按语言返回，重新获取
-  onLangChange(() => { renderTracks(); status(statusKey, statusVars); if (id) void metadata(); });
+  onLangChange(() => { renderTracks(); status(statusKey, statusVars); if (id) void metadata(); renderTagsPrefs(); });
   status(statusKey);
   if (post) {
     // post 页：只有一组带音频的 MP4，隐藏音频轨道与「自由组合」，文字换成 post 的说明
@@ -304,6 +347,7 @@ export function mount({ root, url, signal, player: music, onLangChange }) {
     master = parseMaster(masterBody, masterUrl); selectedVideo = master.videos[0]; selectedAudio = recommendedAudio(selectedVideo, master.audios);
     renderTracks(); controls(); status('mv.ready');
   }
+  renderTagsPrefs();
   load().catch(e => {
     error(e); status('mv.failed');
     for (const name of ['videos', 'audios']) {

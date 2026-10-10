@@ -1,5 +1,6 @@
 // node tests/mv_ui.cjs <path-to-playwright-package>
 // Local fixtures exercise the actual MV page without wrapper-lite or Apple CDN.
+// Set AM_HOOK_BROWSER=msedge when Chrome is not installed.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -31,7 +32,7 @@ async function toggleLang(page) {
   if (mobile) await page.keyboard.press('Escape');
 }
 (async () => {
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await chromium.launch({ channel: process.env.AM_HOOK_BROWSER || 'chrome', headless: true });
   try {
     let scenarios = 0;
     for (const width of [320, 390, 768, 1440]) for (const lang of ['zh', 'en']) {
@@ -131,6 +132,7 @@ async function toggleLang(page) {
       assert.equal(await page.locator('.eyebrow').textContent(), 'VIDEO');
       assert.equal(await page.locator('#apple-link').getAttribute('href'), 'https://music.apple.com/us/post/42');
       assert(await page.locator('#audio-tracks').isHidden());
+      assert(await page.locator('#mv-tags').isHidden(), 'post pages hide metadata tag controls');
       assert.equal(await page.locator('#video-count').textContent(), '2');
       // 大小来自 HEAD 的 Content-Length，码率按时长计算
       await page.waitForFunction(() => /Mbps/.test(document.getElementById('video-trigger').textContent));

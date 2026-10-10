@@ -17,6 +17,7 @@ pub mod frag;
 pub mod mv;
 pub mod playready;
 pub mod readahead;
+pub mod tags;
 #[cfg(test)]
 mod testutil;
 

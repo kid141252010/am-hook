@@ -40,6 +40,8 @@ pub static ASSETS: &[Asset] = &[
     asset!("/assets/library.mjs", JS, "library.mjs"),
     asset!("/assets/player.js", JS, "player.js"),
     asset!("/assets/i18n.js", JS, "i18n.js"),
+    // 下载元数据标签偏好、iTunes atoms 与封面/歌词获取
+    asset!("/assets/tags.js", JS, "tags.js"),
     // 专辑动态封面播放（editorialVideo 的 HLS，MSE 播放）
     asset!("/assets/motion-art.mjs", JS, "motion-art.mjs"),
     // 部署环境（serverless 部署由函数生成，见 serverless/core.mjs）与 wrapper-lite 客户端：服务端转发或浏览器直连本地 wrapper-lite

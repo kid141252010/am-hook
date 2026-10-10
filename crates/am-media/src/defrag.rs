@@ -16,6 +16,7 @@ use crate::bmff::{self, be32, put32, put64, version_flags, Atom, FourCC};
 use crate::cenc::tkhd_track_id;
 use crate::frag::{sgpd_grouping_type, traf_tfhd, Sample, Sbgp, Tfhd, Trex, Trun, TRUN_DATA_OFFSET};
 use crate::readahead::{Reader, Sink, Source};
+use crate::tags::Tags;
 use crate::{bail, Error, Result};
 
 /// Chunk duration bound in seconds when interleaving.
@@ -32,17 +33,18 @@ pub struct Options {
     pub minor_version: u32,
     pub compatible_brands: Vec<FourCC>,
     pub interleave: bool,
+    pub tags: Option<Tags>,
 }
 
 impl Options {
     /// The reference song path (`DefragmentMP4`).
     pub fn song() -> Options {
-        Options { major_brand: *b"M4A ", minor_version: 1, compatible_brands: vec![*b"M4A ", *b"mp42", *b"isom", *b"iso5"], interleave: false }
+        Options { major_brand: *b"M4A ", minor_version: 1, compatible_brands: vec![*b"M4A ", *b"mp42", *b"isom", *b"iso5"], interleave: false, tags: None }
     }
 
     /// MV downloads: same brands as the reference mv.Mux output, interleaved chunks.
     pub fn mv() -> Options {
-        Options { major_brand: *b"isom", minor_version: 0x200, compatible_brands: vec![*b"isom", *b"iso4"], interleave: true }
+        Options { major_brand: *b"isom", minor_version: 0x200, compatible_brands: vec![*b"isom", *b"iso4"], interleave: true, tags: None }
     }
 
     fn ftyp(&self) -> Atom {
@@ -191,6 +193,16 @@ pub fn defragment<S: Source, W: Sink>(input: S, output: &mut W, options: &Option
     moov.children_mut().retain(|c| &c.kind != b"mvex");
     let ftyp = options.ftyp();
     ensure_tag_metadata(&mut moov);
+    if let Some(tags) = &options.tags {
+        let atoms = tags.to_ilst();
+        if !atoms.is_empty() {
+            let mut payload = Vec::new();
+            for atom in &atoms {
+                atom.encode(&mut payload);
+            }
+            *moov.req_mut(&[b"udta", b"meta", b"ilst"])?.bytes_mut() = payload;
+        }
+    }
 
     let order = write_order(&tracks, options.interleave);
     let mdat_sizes = plan_mdats(&tracks, &order).map_err(|e| e.context("plan output mdat boxes"))?;
@@ -1096,4 +1108,78 @@ mod tests {
         enc.extend(fragment(1, &[Run { track: 1, start_time: 0, samples: vec![(1, 0, vec![1])] }], &|_| Vec::new()));
         assert!(defragment(&enc[..], &mut out, &Options::song()).unwrap_err().to_string().contains("is encrypted"));
     }
+
+    #[test]
+    fn defrag_writes_tags_and_keeps_chunk_offsets() {
+        use crate::tags::{Cover, CoverFormat, Tags};
+
+        let specs = [
+            Spec { id: 1, timescale: 44100, duration: 4096, samples: 100, per_fragment: 40 },
+            Spec { id: 2, timescale: 48000, duration: 1024, samples: 300, per_fragment: 150 },
+        ];
+        let input = fragmented(&specs);
+
+        let tags = Tags {
+            title: Some("Test Title".to_string()),
+            artist: Some("Test Artist".to_string()),
+            album: Some("Test Album".to_string()),
+            track_number: Some(3),
+            track_total: Some(12),
+            disc_number: Some(1),
+            disc_total: Some(2),
+            media_kind: Some(1),
+            rating: Some(4),
+            cover: Some(Cover { format: CoverFormat::Jpeg, data: vec![0xFF, 0xD8, 0xFF, 0x00] }),
+            ..Tags::default()
+        };
+
+        let mut options = Options::song();
+        options.tags = Some(tags);
+
+        let mut out = Vec::new();
+        defragment(&input[..], &mut out, &options).unwrap();
+
+        let atoms = bmff::parse(&out).unwrap();
+        let moov = atoms.iter().find(|a| a.kind == *b"moov").unwrap();
+        let ilst = moov.path(&[b"udta", b"meta", b"ilst"]).unwrap();
+        // bmff treats ilst as a leaf; enumerate its payload boxes directly.
+        let ilst_payload = ilst.bytes();
+        let ilst_spans = bmff::spans(ilst_payload, 0, ilst_payload.len()).unwrap();
+
+        let kinds: Vec<&[u8]> = ilst_spans.iter().map(|s| &s.kind[..]).collect();
+        assert_eq!(kinds.len(), 8, "expected 8 ilst entries, got {:?}", kinds);
+        for want in [&b"\xa9nam"[..], &b"\xa9ART"[..], &b"\xa9alb"[..], &b"trkn"[..], &b"disk"[..], &b"stik"[..], &b"rtng"[..], &b"covr"[..]] {
+            assert!(kinds.contains(&want), "missing ilst kind {:?}", want);
+        }
+
+        let item_payload = |kind: &[u8]| -> Vec<u8> {
+            let span = ilst_spans.iter().find(|s| &s.kind[..] == kind).unwrap();
+            bmff::Atom::from_span(ilst_payload, span).unwrap().bytes().to_vec()
+        };
+
+        let data_value = |payload: &[u8]| -> (u32, Vec<u8>) {
+            let spans = bmff::spans(payload, 0, payload.len()).unwrap();
+            assert_eq!(spans.len(), 1, "expected single data box");
+            let data = bmff::Atom::from_span(payload, &spans[0]).unwrap();
+            let b = data.bytes();
+            let ty = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+            (ty, b[8..].to_vec())
+        };
+
+        let (ty, val) = data_value(&item_payload(b"\xa9nam"));
+        assert_eq!(ty, 1);
+        assert_eq!(val, b"Test Title".to_vec());
+
+        let (ty, val) = data_value(&item_payload(b"trkn"));
+        assert_eq!(ty, 0);
+        assert_eq!(val, vec![0, 0, 0, 3, 0, 12, 0, 0]);
+
+        let (ty, _) = data_value(&item_payload(b"covr"));
+        assert_eq!(ty, 13);
+
+        for (trak, spec) in moov.all(b"trak").zip(specs.iter()) {
+            check_samples(&out, trak, spec);
+        }
+    }
+
 }

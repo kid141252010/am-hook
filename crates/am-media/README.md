@@ -23,7 +23,9 @@ The Rust server does not link it.
     (`M4A `, 1, `M4A  mp42 isom iso5`), one chunk per source `trun` and
     tracks written one after another.
 
-No transcoding or tag writing is done. The worker talks to OPFS through
+No transcoding is done. Defragmentation can optionally write iTunes metadata
+atoms when the worker receives a tags JSON payload (and separate cover bytes);
+without that payload the original tag-free behavior is preserved. The worker talks to OPFS through
 synchronous access handles, or to in-memory stand-ins when OPFS is unavailable;
 randomness and file IO are host imports, so no wasm-bindgen glue is needed.
 

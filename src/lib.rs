@@ -10,7 +10,6 @@ pub mod wrapper;
 
 use std::sync::Arc;
 
-use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -20,7 +19,7 @@ use crate::state::AppState;
 pub fn router(state: Arc<AppState>) -> Router {
     // 内嵌前端资源按 assets::ASSETS 表注册，其余是后端接口
     let router = assets::ASSETS.iter().fold(Router::new(), |router, asset| {
-        router.route(asset.url, get(move |headers: HeaderMap| async move { assets::serve(&headers, asset) }))
+        router.route(asset.url, get(move |headers: axum::http::HeaderMap| async move { assets::serve(&headers, asset) }))
     });
     router
         .route("/", get(ui::app_handler))
