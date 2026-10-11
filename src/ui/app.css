@@ -464,6 +464,24 @@ body.home-page {
 .song-source { margin: 14px 0 0; color: var(--faint); font-size: 12px; font-family: var(--mono); overflow-wrap: anywhere; }
 .song-title.skeleton { width: min(360px, 80%); height: 40px; }
 .song-sub.skeleton { width: min(240px, 60%); height: 20px; }
+.song-region { margin-top: 12px; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.song-region select { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; max-width: min(320px, 100%); }
+.song-region select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.song-details { margin-top: 28px; }
+.song-details[hidden] { display: none; }
+.details-title { margin: 0; font-size: 15px; font-weight: 750; }
+.details-list { margin: 14px 0 0; padding: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; }
+.detail-row { display: contents; }
+.detail-label { color: var(--muted); white-space: nowrap; font-size: 13px; padding-top: 1px; }
+.detail-value { margin: 0; overflow-wrap: anywhere; font-size: 14px; }
+.detail-value a { color: var(--accent); text-decoration: none; }
+.detail-value a:hover { text-decoration: underline; }
+.detail-id { font-family: var(--mono); font-size: 13px; }
+.credits-groups { display: flex; flex-direction: column; gap: 8px; }
+.credits-group { display: flex; flex-direction: column; gap: 2px; }
+.credits-role { color: var(--muted); font-size: 12px; letter-spacing: .04em; }
+.credits-person { font-size: 14px; }
 
 .variants { margin-top: 36px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
 .variants[hidden] { display: none; }
@@ -1005,6 +1023,8 @@ body.has-player { padding-bottom: calc(var(--player-height, 110px) + 32px + env(
   .song-actions .btn { padding: 0 8px; font-size: 12px; }
   .song-source { font-size: 10px; }
   .variants { margin-top: 24px; }
+  .details-list { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .detail-row { display: flex; flex-direction: column; gap: 2px; }
   .variants-head { padding: 18px 16px; }
   .variant { grid-template-columns: 44px minmax(0, 1fr) 44px; gap: 10px; padding: 16px 12px; }
   .variant-name { font-size: 14px; }
