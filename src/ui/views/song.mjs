@@ -23,6 +23,8 @@ addEventListener('beforeunload', (e) => {
  * 复制到下载目录，不能保存后立即删除；开始新下载、离开歌曲页或关闭标签页时再删除。
  */
 const saved = new Set();
+/** 制作人员缓存：`${adamId}:${cc}` -> [{ group, people: [{ name, roles: [] }] }]（只缓存非空结果） */
+const creditsCache = new Map();
 
 function saveResult(result, fileName) {
   const url = URL.createObjectURL(result.file);
@@ -49,6 +51,8 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
   const adamId = linkMatch[2];
   const $ = (id) => root.querySelector(`#${id}`);
   let meta = {};
+  /** 歌曲页局部的元数据地区覆盖（默认 URL 中的地区）；切换后 loadMeta() 用它重拉 */
+  let metaCountry = country;
   let variants = [];
   let rows = new Map();
   /** group_id -> { ctl, done, total }，本歌曲进行中的浏览器端下载（见 downloadsBySong） */
@@ -460,8 +464,8 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
 
   // 经服务端 /amp 代理请求 amp-api 的 songs 资源（与 music.apple.com 相同），名称按曲库语言返回
   // （l 为该地区选定的曲库语言或默认语言，见 AmI18n.catalogLang）。先查歌曲链接所在地区，查不到时依次回退 us / cn。
-  async function lookupMeta() {
-    for (const cc of new Set([country, 'us', 'cn'])) {
+  async function lookupMeta(preferred) {
+    for (const cc of new Set([preferred, 'us', 'cn'])) {
       try {
         const url = new URL(`/amp/v1/catalog/${cc}/songs/${adamId}`, location.origin);
         url.searchParams.set('include', 'albums,artists');
@@ -483,6 +487,7 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
           artist: a.artistName || '',
           album: a.albumName || '',
           albumId: song.relationships?.albums?.data?.[0]?.id || '',
+          artistId: song.relationships?.artists?.data?.[0]?.id || '',
           // 各位艺人的名字与本站艺人页路径，用于把艺人行中的名字做成链接
           artists: (song.relationships?.artists?.data || []).filter((r) => r.attributes?.name).map((r) => ({
             name: r.attributes.name,
@@ -518,6 +523,55 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
     return m ? `/https://music.apple.com/${m[1].toLowerCase()}/artist/${m[2]}/${m[3]}` : `/https://music.apple.com/${cc}/artist/_/${resource.id}`;
   }
 
+  /**
+   * 经服务端 /amp 代理请求 amp-api 的制作人员：GET /amp/v1/catalog/{cc}/songs/{id}/credits?l={tag}。
+   * l 参数必填（不带会 404）；404 = 该歌曲无制作人员数据，静默返回空数组。
+   * 返回按角色分组：[{ group, people: [{ name, roles: [] }] }]，防御性解析，绝不编造数据。
+   */
+  async function fetchCredits(adamId, cc, signal) {
+    const key = `${adamId}:${cc}`;
+    if (creditsCache.has(key)) return creditsCache.get(key);
+    try {
+      const url = new URL(`/amp/v1/catalog/${cc}/songs/${adamId}/credits`, location.origin);
+      const tag = await AmI18n.catalogLang(cc);
+      url.searchParams.set('l', tag || 'en-US');
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (res.status === 404 || !res.ok) return [];
+      const body = await res.json();
+      const groups = new Map();
+      const add = (group, entries) => {
+        if (!Array.isArray(entries)) return;
+        const people = entries.map((entry) => {
+          const attributes = entry?.attributes || entry || {};
+          const name = attributes.name;
+          if (!name) return null;
+          return {
+            name,
+            roles: Array.isArray(attributes.roleNames) ? [...attributes.roleNames] : [],
+          };
+        }).filter(Boolean);
+        if (people.length) groups.set(group, [...(groups.get(group) || []), ...people]);
+      };
+      if (Array.isArray(body?.data)) {
+        for (const entry of body.data) {
+          const attributes = entry?.attributes || {};
+          const group = attributes.group || attributes.roleCategory || attributes.category || entry.group || 'CREDITS';
+          add(group, [entry]);
+        }
+      } else if (body && typeof body === 'object') {
+        for (const [group, entries] of Object.entries(body)) add(group, entries);
+        if (body.data && typeof body.data === 'object' && !Array.isArray(body.data)) {
+          for (const [group, entries] of Object.entries(body.data)) add(group, entries);
+        }
+      }
+      const result = [...groups].map(([group, people]) => ({ group, people }));
+      if (result.length) creditsCache.set(key, result);
+      return result;
+    } catch {
+      return [];
+    }
+  }
+
   /** 本站专辑页路径 */
   function albumHref() {
     return meta.album && meta.albumId ? `/https://music.apple.com/${meta.country || country}/album/_/${meta.albumId}` : '';
@@ -546,6 +600,52 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
     $('meta').replaceChildren(...tags.map((tag) => el('span', { className: 'badge', textContent: tag })));
     if (meta.artwork) $('cover').replaceChildren(el('img', { src: meta.artwork, alt: t('song.coverAlt', { title }) }));
     if (meta.url) $('apple-link').href = meta.url;
+    renderDetails();
+  }
+
+  /** 歌曲详细信息区：歌名/艺人/专辑/ISRC/各 ID（外链到 Apple Music）/制作人员 */
+  function renderDetails() {
+    const section = $('details');
+    const list = $('details-list');
+    if (!metaLoaded || !meta.title) { section.hidden = true; return; }
+    const cc = meta.country || country;
+    const rows = [];
+    const row = (labelKey, valueNode) => {
+      if (valueNode == null) return;
+      rows.push(el('div', { className: 'detail-row' },
+        el('dt', { className: 'detail-label', textContent: t(labelKey) }),
+        el('dd', { className: 'detail-value' }, valueNode)));
+    };
+    const text = (s) => (s ? el('span', { textContent: s }) : null);
+    const idLink = (kind, id) => {
+      if (!id) return null;
+      const a = el('a', { className: 'detail-id', textContent: id, href: `https://music.apple.com/${cc}/${kind}/_/${id}` });
+      a.target = '_blank';
+      a.rel = 'noreferrer';
+      return a;
+    };
+    row('song.detailTitle', text(meta.title));
+    const artistNames = meta.artists && meta.artists.length ? meta.artists.map((a) => a.name).join(', ') : meta.artist;
+    row('song.detailArtist', text(artistNames));
+    row('song.detailAlbum', text(meta.album));
+    row('song.detailIsrc', meta.isrc ? el('span', { className: 'detail-id', textContent: meta.isrc }) : null);
+    row('song.detailSongId', idLink('song', adamId));
+    row('song.detailAlbumId', idLink('album', meta.albumId));
+    row('song.detailArtistId', idLink('artist', meta.artistId));
+    if (meta.credits && meta.credits.length) {
+      const wrap = el('div', { className: 'credits-groups' });
+      for (const g of meta.credits) {
+        const people = g.people.map((p) => el('div', {
+          className: 'credits-person',
+          textContent: p.roles && p.roles.length ? `${p.name}（${p.roles.join('、')}）` : p.name,
+        }));
+        wrap.append(el('div', { className: 'credits-group' },
+          el('div', { className: 'credits-role', textContent: g.group }), ...people));
+      }
+      row('song.detailCredits', wrap);
+    }
+    list.replaceChildren(...rows);
+    section.hidden = false;
   }
 
   let metaSeq = 0;
@@ -553,18 +653,65 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
   async function loadMeta() {
     // 快速切换语言时只采用最后一次请求的结果；离开页面后不再改标题
     const seq = ++metaSeq;
-    const result = await lookupMeta();
+    const result = await lookupMeta(metaCountry);
+    // 制作人员：主元数据成功后用实际返回数据的地区拉取；失败/无数据时为空数组，不打断主流程
+    let credits = [];
+    try {
+      const cc = result.country || metaCountry;
+      if (result.title && cc) credits = await fetchCredits(adamId, cc, signal);
+    } catch { credits = []; }
     if (seq !== metaSeq || signal.aborted) return;
     // 切换语言后重新获取失败时保留已有信息
     if (metaLoaded && !result.title) return;
     meta = result;
+    meta.credits = credits;
     metaLoaded = true;
     renderMeta();
+    // 地区切换的提示只在切换成功后清除，不误删 loadVariants 等其他报错
+    if (alertState && alertState.message === regionLoadingMsg) showAlert('', '');
     libraryToggle.refresh();
     favoriteToggle.refresh();
     playlistBtn.disabled = !meta.resource;
     if (rows.size) renderVariants(); // 下载文件名需要歌名
   }
+
+  /** 地区切换器：选项来自 AmI18n.storefronts()，只影响本页的元数据地区（不碰全局主地区） */
+  const regionLoadingMsg = () => t('song.regionLoading');
+  async function initRegionSelect() {
+    const select = $('region-select');
+    if (!select) return;
+    const def = document.createElement('option');
+    def.value = country;
+    def.textContent = country.toUpperCase();
+    select.replaceChildren(def);
+    select.value = country;
+    let map = null;
+    try { map = await AmI18n.storefronts(); } catch { map = null; }
+    if (signal.aborted) return;
+    const ccs = map ? Object.keys(map) : [...new Set([country, 'us', 'cn'])];
+    const nameOf = (cc) => (map && map[cc] && map[cc].name) || cc.toUpperCase();
+    ccs.sort((a, b) => nameOf(a).localeCompare(nameOf(b), AmI18n.lang === 'zh' ? 'zh-CN' : 'en'));
+    select.replaceChildren(...ccs.map((cc) => {
+      const o = document.createElement('option');
+      o.value = cc;
+      o.textContent = `${nameOf(cc)} · ${cc.toUpperCase()}`;
+      return o;
+    }));
+    if (!ccs.includes(metaCountry)) {
+      const o = document.createElement('option');
+      o.value = metaCountry;
+      o.textContent = metaCountry.toUpperCase();
+      select.append(o);
+    }
+    select.value = metaCountry;
+  }
+  initRegionSelect();
+  const regionSelect = $('region-select');
+  if (regionSelect) regionSelect.addEventListener('change', (e) => {
+    metaCountry = e.target.value;
+    showAlert('info', regionLoadingMsg);
+    loadMeta();
+  });
 
   $('reparse').addEventListener('click', loadVariants);
 

@@ -22,8 +22,17 @@
             Apple Music
           </a>
         </div>
+        <div class="song-region">
+          <label for="region-select" data-i18n="song.region"></label>
+          <select id="region-select" data-i18n-attr="aria-label=song.region"></select>
+        </div>
         <p class="song-source" id="source"></p>
       </div>
+    </section>
+
+    <section class="song-details" id="details" hidden>
+      <h2 class="details-title" data-i18n="song.details"></h2>
+      <dl class="details-list" id="details-list"></dl>
     </section>
 
     <div class="alert info" id="alert" hidden aria-live="polite"></div>
