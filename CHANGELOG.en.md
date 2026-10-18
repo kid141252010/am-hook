@@ -1,5 +1,36 @@
 # CHANGELOG
 
+## v0.5.1 (2026-10-19)
+
+### New
+- ✨ `--local-wrapper-only`: the binary no longer relays wrapper-lite; pages only connect from the browser (as on a serverless deployment without `AM_HOOK_WRAPPER_URL`), and `--wrapper-url` / `--wrapper-rate` / `--wrapper-concurrency` become the page's local-mode defaults
+- ✨ `--wrapper-hint` (`AM_HOOK_WRAPPER_HINT` on serverless): an operator note above the local wrapper-lite settings; URLs in it become links
+- ✨ wrapper-lite queueing in the console: while requests wait, a `wrapper-lite THROTTLED` line every second (sent in the last second / limit, in flight, queued), and a summary when the queue empties; queued requests are marked `QUEUED … by rate limit / concurrency limit` in the request log
+
+### Fixes
+- 🐛 wrapper-lite rate limit: a queued request cancelled while waiting (browser abort or disconnect) let one extra request through, which could exceed `--wrapper-rate` within that second
+
+## v0.5.0 (2026-10-18)
+
+### New
+- ✨ Radio (`/radio`, between Top Charts and Settings in the sidebar and phone menu): the editorial sections of music.apple.com/{cc}/radio, with a LIVE badge and the show on air on the live radio shelf; with a media-user-token, Your Stations (the personal station and recently played) comes first
+- ✨ Station pages (`/https://music.apple.com/<cc>/station/<slug>/ra.<id>`); station links on New, editorial pages and Radio open them here:
+  - Personal and editorial stations: the playlist track list holding the station's next songs, with a new batch or more on demand; playback fetches the next batch before the queue runs out (new `more` option of `AmPlayer.playQueue`)
+  - Episodes (audio or video): the music video layout, with playback, seeking and downloads as M4A / MP4 (tagged with title, show, air date and artwork)
+  - Live radio: the music video layout, playing near the live edge with the song on air (ID3 in the segments' emsg) and the schedule
+- ✨ Stations need the media-user-token of an Apple Music account (wrapper-lite does not support stations yet): the first station page asks for it (a whole Cookie header also works), checks it and keeps it only in the browser; a rejected token is asked for again, and Settings can change or clear it
+- ✨ New station endpoints on the server (binary and serverless): `/station/next-tracks/<id>`, `/station/assets`, `/station/catalog/...`, `/station/recent` and `/station/storefront` call amp-api with the media-user-token (never cached), and `/station/license` sends Widevine / PlayReady license requests shaped as MusicKit does straight to Apple's license servers
+
+### Changed
+- The MV engine's download is split into a shared `downloadStreams` (used by MVs and episodes; a single stream keeps its own track)
+
+## v0.4.9 (2026-10-18)
+
+### Bug Fixes
+- 🐛 Saving to a folder failed for names that start or end with `~` (e.g. the album "A COMPLETE ~ALL SINGLES~": `Failed to execute 'getDirectoryHandle'`): name sanitizing now follows Chrome's rules, replacing a leading or trailing `~` with the full-width `～` and removing leading and trailing dots and whitespace (including the ideographic space), C1 control characters, format characters (zero-width spaces, direction marks, etc.), noncharacters and lone surrogates; `.lnk` / `.local` / `.{…}` extensions and reserved names such as `clock$`, `desktop.ini`, `thumbs.db` and `COM¹` are renamed too
+- 🐛 Saving failed for overly long names: each name is capped at 240 bytes (UTF-8; macOS / Linux allow 255 bytes, which long Japanese titles used to exceed), and the path below the chosen folder at 150 characters with album / playlist folders at 90, to stay within the 260-character Windows path limit (including Chrome's `.crswap` temporary suffix); when over, the longest segment is shortened first
+- 🐛 The file name previews in Settings show the shortened result actually used
+
 ## v0.4.8 (2026-10-18)
 
 ### Bug Fixes

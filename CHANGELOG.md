@@ -1,5 +1,36 @@
 # 更新日志
 
+## v0.5.1 (2026-10-19)
+
+### 新功能
+- ✨ `--local-wrapper-only`：二进制不再转发 wrapper-lite，页面只用浏览器直连（与 serverless 部署没有设置 `AM_HOOK_WRAPPER_URL` 时相同）；`--wrapper-url` / `--wrapper-rate` / `--wrapper-concurrency` 改为页面本地模式的默认值
+- ✨ `--wrapper-hint`（serverless 为 `AM_HOOK_WRAPPER_HINT`）：在本地 wrapper-lite 设置上方显示部署方的提示，其中的网址显示为链接
+- ✨ 命令行显示 wrapper-lite 排队情况：排队期间每秒一行 `wrapper-lite THROTTLED`（最近 1 秒发出数 / 上限、进行中、排队数），队列清空时输出汇总；排队的请求在请求日志中标出 `QUEUED … by rate limit / concurrency limit`
+
+### 修复
+- 🐛 wrapper-lite 限速：排队等待中的请求被取消（浏览器中止、断开）时会多放行一个请求，这一秒内可能超过 `--wrapper-rate`
+
+## v0.5.0 (2026-10-18)
+
+### 新功能
+- ✨ 广播（`/radio`，侧边栏与手机菜单中「排行榜」与「设置」之间）：与 music.apple.com/{cc}/radio 相同的编辑区块，直播电台货架显示「直播」标记与正在播出的节目；填过 media-user-token 时最上面另有「你的电台」（个人电台与最近播放）
+- ✨ 电台页（`/https://music.apple.com/<cc>/station/<slug>/ra.<id>`），新发现、编辑页与广播中的电台链接都在站内打开：
+  - 个人电台与编辑电台：与歌单页相同的曲目列表，内容是电台接下来的几首，可换一批、加载更多，播放到队尾前自动续取（`AmPlayer.playQueue` 新增 `more`）
+  - 广播单集（音频或视频）：沿用 MV 页的布局，可播放、跳转并下载为 M4A / MP4（带标题、节目、播出日期与封面标签）
+  - 直播电台：沿用 MV 页的布局，从直播窗口末尾附近播放，显示当前歌曲（分片 emsg 中的 ID3）与节目表
+- ✨ 电台需要 Apple Music 账号的 media-user-token（wrapper-lite 暂不支持电台）：第一次打开电台页时提示填写（可粘贴整段 Cookie），检验后只保存在浏览器中；被拒绝时再次提示，设置中心可以修改或清除
+- ✨ 服务端（二进制与 serverless）新增电台接口：`/station/next-tracks/<id>`、`/station/assets`、`/station/catalog/...`、`/station/recent`、`/station/storefront` 带上 media-user-token 请求 amp-api（不缓存），`/station/license` 按 MusicKit 的格式把 Widevine / PlayReady license 请求直接发给 Apple 的 license 服务器
+
+### 变更
+- MV 引擎的下载拆出通用的 `downloadStreams`（MV 与广播单集共用；只有一条流时保留原来的轨道）
+
+## v0.4.9 (2026-10-18)
+
+### 修复
+- 🐛 保存至文件夹时名字以 `~` 开头或结尾会报错（如专辑「A COMPLETE ~ALL SINGLES~」：`Failed to execute 'getDirectoryHandle'`）：文件名清理按 Chrome 的规则补齐，首尾的 `~` 换成全角 `～`，并去掉首尾的点与空白（含全角空格）、C1 控制字符、格式字符（零宽空格、方向标记等）、非字符与落单的代理项；`.lnk` / `.local` / `.{…}` 扩展名与 `clock$`、`desktop.ini`、`thumbs.db`、`COM¹` 等保留名也会改名
+- 🐛 名字过长时保存失败：单个名字限制在 240 字节（UTF-8，macOS / Linux 上限 255 字节，长日文标题此前会超出）；所选文件夹下的相对路径限制在 150 个字符、专辑 / 歌单文件夹限制在 90 个字符，避免超过 Windows 260 字符的路径上限（已计入 Chrome 写入时的 `.crswap` 临时后缀），超出时每次截短最长的一段
+- 🐛 设置页的文件名预览按截断后的实际结果显示
+
 ## v0.4.8 (2026-10-18)
 
 ### 修复

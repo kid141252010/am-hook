@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::json;
 use crate::{assets, log};
 use crate::links::{
-    is_charts_path, is_editorial_link, is_library_path, is_settings_path, parse_album_link, parse_artist_link, parse_mv_link, parse_playlist_link,
-    parse_post_link, parse_song_link,
+    is_charts_path, is_editorial_link, is_library_path, is_radio_path, is_settings_path, parse_album_link, parse_artist_link, parse_mv_link,
+    parse_playlist_link, parse_post_link, parse_song_link, parse_station_link,
 };
 use crate::state::AppState;
 use crate::wrapper::Lyrics;
@@ -22,7 +22,7 @@ pub async fn app_handler(headers: HeaderMap) -> Response<Body> {
 }
 
 /// 其余路径：Apple Music 页面路径本身也是 "https://..."（`/` 后拼接官网地址），
-/// 歌曲 / MV / post / 专辑 / 歌单 / 艺人页、编辑页、资料库页与设置中心都返回单页应用，其他一律 404
+/// 歌曲 / MV / post / 专辑 / 歌单 / 艺人 / 电台页、编辑页、广播、资料库页与设置中心都返回单页应用，其他一律 404
 pub async fn fallback_handler(uri: Uri, headers: HeaderMap) -> Response<Body> {
     let path = uri.path().strip_prefix('/').unwrap_or(uri.path());
     if parse_song_link(path).is_ok()
@@ -31,9 +31,11 @@ pub async fn fallback_handler(uri: Uri, headers: HeaderMap) -> Response<Body> {
         || parse_album_link(path).is_ok()
         || parse_playlist_link(path).is_ok()
         || parse_artist_link(path).is_ok()
+        || parse_station_link(path).is_ok()
         || is_editorial_link(path)
         || is_charts_path(path)
         || is_library_path(path)
+        || is_radio_path(path)
         || is_settings_path(path)
     {
         return app_handler(headers).await;
@@ -47,6 +49,47 @@ pub async fn fallback_handler(uri: Uri, headers: HeaderMap) -> Response<Body> {
         .body(Body::from("Not found\n"))
         .unwrap();
     log::note(response, "not found")
+}
+
+/// 部署环境（window.AM_HOOK_HOST，见 src/ui/host.js）：服务端是否转发 wrapper-lite、不转发时页面本地模式的默认值，
+/// 以及本地设置上方的提示。`--wrapper-auth` 只用于服务端转发，从不交给页面
+pub async fn host_js_handler(State(state): State<Arc<AppState>>) -> Response<Body> {
+    let config = &state.config;
+    let mut host = json!({ "serverWrapper": config.wrapper_relay });
+    if !config.wrapper_relay {
+        host["wrapper"] = json!({
+            "url": config.wrapper_url,
+            "rate": config.wrapper_rate,
+            "concurrency": config.wrapper_concurrency,
+        });
+    }
+    if let Some(hint) = &config.wrapper_hint {
+        host["hint"] = json!(hint);
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
+        .header(axum::http::header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(format!("window.AM_HOOK_HOST = {host};\n")))
+        .unwrap()
+}
+
+/// `--local-wrapper-only` 时转发 wrapper-lite 的接口一律返回 501（与 serverless 部署没有设置 AM_HOOK_WRAPPER_URL 时相同）
+pub async fn require_relay(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response<Body> {
+    if state.config.wrapper_relay {
+        return next.run(request).await;
+    }
+    let msg = "Server-side wrapper-lite relaying is disabled; use a local wrapper-lite (Settings > wrapper-lite)";
+    let body = if request.uri().path() == "/status" {
+        json!({ "code": 1, "msg": msg, "regions": [] })
+    } else {
+        json!({ "code": 1, "msg": msg })
+    };
+    log::note(json_response(StatusCode::NOT_IMPLEMENTED, body), "wrapper-lite relaying disabled")
 }
 
 /// Relay the original wrapper-lite webplayback response.
@@ -350,7 +393,9 @@ mod tests {
             assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-store", "{path}");
         }
         // 页面地址仍返回外壳
-        let page = fallback_handler("/library/songs".parse().unwrap(), HeaderMap::new()).await;
-        assert_eq!(page.status(), StatusCode::OK);
+        for path in ["/library/songs", "/radio", "/https://music.apple.com/us/station/apple-music-1/ra.978194965"] {
+            let page = fallback_handler(path.parse().unwrap(), HeaderMap::new()).await;
+            assert_eq!(page.status(), StatusCode::OK, "{path}");
+        }
     }
 }

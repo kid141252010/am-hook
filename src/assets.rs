@@ -80,6 +80,9 @@ pub static ASSETS: &[Asset] = &[
     asset!("/assets/mv/captions.mjs", JS, "mv-captions.mjs"),
     asset!("/assets/mv/cea608.mjs", JS, "mv-cea608.mjs"),
     asset!("/assets/mv/style.css", CSS, "mv.css"),
+    // 电台：直播电台与广播单集的 HLS 播放与下载（与 MV 共用媒体 Worker），以及需要 media-user-token 的接口
+    asset!("/assets/mv/radio.mjs", JS, "mv-radio.mjs"),
+    asset!("/assets/station.mjs", JS, "station.mjs"),
     // 歌词界面：TTML 解析、接入播放器的 panel.mjs、打包好的 AMLL（见 browser/amll）与原来的封面背景（backdrop*.mjs）
     asset!("/assets/lyrics/panel.mjs", JS, "lyrics/panel.mjs"),
     asset!("/assets/lyrics/ttml.mjs", JS, "lyrics/ttml.mjs"),
@@ -105,6 +108,10 @@ pub static ASSETS: &[Asset] = &[
     asset!("/assets/views/browse.html", HTML, "views/browse.html"),
     asset!("/assets/views/browse.mjs", JS, "views/browse.mjs"),
     asset!("/assets/views/browse.css", CSS, "views/browse.css"),
+    // 电台页：个人 / 编辑电台（接下来的几首）与直播电台、广播单集（MV 页的布局）
+    asset!("/assets/views/station.html", HTML, "views/station.html"),
+    asset!("/assets/views/station.mjs", JS, "views/station.mjs"),
+    asset!("/assets/views/station.css", CSS, "views/station.css"),
     // 各页面共用的条目操作（封面悬停按钮、「更多」菜单）与专辑 / 歌单页共用的头部（主题色、动态封面）
     asset!("/assets/views/actions.mjs", JS, "views/actions.mjs"),
     asset!("/assets/views/detail-header.mjs", JS, "views/detail-header.mjs"),
@@ -123,8 +130,8 @@ pub static ASSETS: &[Asset] = &[
     asset!("/assets/views/download-dialog.mjs", JS, "views/download-dialog.mjs"),
 ];
 
-/// 由部署环境生成的资源（serverless 部署见 serverless/core.mjs）：不加哈希，也不改写
-const HOST_JS: &str = "/assets/host.js";
+/// 由部署环境生成的资源（二进制见 ui::host_js_handler，serverless 部署见 serverless/core.mjs）：不加哈希，也不改写
+pub const HOST_JS: &str = "/assets/host.js";
 /// 内容哈希地址的前缀；其下的资源内容永不改变，可长期缓存（serverless 部署由 vercel.json / dist/_headers 设置）
 pub const HASHED_PREFIX: &str = "/assets/h/";
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
