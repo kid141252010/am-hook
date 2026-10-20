@@ -265,7 +265,7 @@ fn decode_query(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn format_elapsed(elapsed: Duration) -> String {
+pub(crate) fn format_elapsed(elapsed: Duration) -> String {
     let ms = elapsed.as_secs_f64() * 1000.0;
     if ms >= 1000.0 {
         format!("{:.2} s", ms / 1000.0)
@@ -294,6 +294,11 @@ pub fn print_banner(listen: SocketAddr, config: &Config) {
             None => "none".to_owned(),
         };
         lines.push(format!("                limit {limits} · auth {auth}"));
+        if config.client_rate > 0 || config.client_concurrency > 0 {
+            let source = config.client_ip_header.as_deref().unwrap_or("peer address");
+            let per_client = format!("{}, {}", limit(config.client_rate as usize, "req/min"), limit(config.client_concurrency, "concurrent"));
+            lines.push(format!("                per client {per_client} · IP from {source}"));
+        }
     } else {
         lines.push("  wrapper-lite  not relayed: browsers connect to their own (local mode only)".into());
         lines.push(format!("                page defaults {} · {limits}", config.wrapper_url));
@@ -388,9 +393,10 @@ pub async fn report_wrapper_queue(state: Arc<AppState>) {
             *delayed += s.delayed;
             *longest = (*longest).max(s.longest_wait);
             warn!(
-                "wrapper-lite THROTTLED · sent {}/{rate} in last 1 s · in flight {}/{concurrency} · queued {} ({} for concurrency, {} for rate)",
+                "wrapper-lite THROTTLED · sent {}/{rate} in last 1 s · in flight {}/{concurrency} (+{} held after timeout / cancel) · queued {} ({} for concurrency, {} for rate)",
                 s.sent_last_second,
                 s.in_flight,
+                s.held,
                 s.queued(),
                 s.waiting_concurrency,
                 s.waiting_rate,

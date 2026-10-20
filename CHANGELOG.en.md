@@ -1,5 +1,45 @@
 # CHANGELOG
 
+## v0.5.5 (2026-10-19)
+
+### Changed
+- 💄 The player bar is rebuilt after music.apple.com as a floating glass pill (56px tall, at most 720px wide): playback controls, an LCD, and actions
+  - The LCD has 34px artwork, a two-line marquee and a 2px progress line that expands to 7px with times on hover or drag
+  - Volume becomes a speaker button with a slide-out slider; click to mute
+  - Playback notices (FLAC transcoding, multichannel PCM) move into a popover behind the mode badge, shown automatically only the first time; playback errors float above the bar
+  - Compact mini-player layout at 760px and below
+- 💄 The song page is rebuilt after music.apple.com
+  - Header: 208px artwork (300px at 1260px and up) with a glow, centred on phones; title, linked artists, album · year · genre and audio-trait badges; the page is tinted with the artwork colour like the album page
+  - The Play button turns into Pause while the song plays; a favourite button and a More menu (library, playlists, download, copy links, open in Apple Music) replace the row of buttons
+  - The quality list is grouped by format in rounded cards, with rows styled like album track rows; each row has a download button whose progress ring cancels on click; the More menu adds "Copy m3u8 link"; skeleton rows while loading
+  - New Credits, Information, Music Videos and More By sections
+
+## v0.5.4 (2026-10-19)
+
+### New
+- ✨ Preferred quality adds AAC 128 kbps, AAC Binaural 128 kbps, HE-AAC Binaural 64 kbps, AAC Downmix 128 kbps and HE-AAC Downmix 64 kbps (Apple's masters already carry them; previously the highest bitrate of a kind was always taken), 11 choices in all. The menu in Settings and the download dialog is grouped as Lossless & Dolby Atmos / AAC Stereo / AAC Binaural / AAC Downmix, and the description gives rough file sizes per minute. Each new choice has its own fallback order, e.g. a stereo-only song asked for Binaural 128 gets HE Binaural, then Stereo 128 (#4)
+- 📝 README links the Telegram group [@apple_music_alac](https://t.me/apple_music_alac)
+
+### Fixes
+- 🐛 Some older music videos (e.g. 1175186184) have media playlists without `EXT-X-KEY` and failed with "No PlayReady media found"; they now play and download
+
+## v0.5.3 (2026-10-19)
+
+### New
+- ✨ `--client-concurrency`: max wrapper-lite requests relayed at once per client IP (`/status` not counted); further requests wait instead of failing. Together with the per-minute `--client-rate`, one visitor's burst can no longer hold every `--wrapper-concurrency` permit and stall everyone else. Waiting requests are logged as `QUEUED … by client concurrency`
+
+### Fixes
+- 🐛 `/status` is not counted by `--client-rate`, yet a client could keep requesting it and every request reached wrapper-lite, using up `--wrapper-rate` and concurrency permits: all clients now share one result for 10 s and simultaneous requests are merged, so wrapper-lite gets at most one `/status` per 10 s; the upstream `/status` also has a 10 s timeout
+
+## v0.5.2 (2026-10-19)
+
+### New
+- ✨ `--client-rate`: max relayed wrapper-lite requests per client IP in any 60 seconds (`/status` not counted); further requests get HTTP 429 with `Retry-After` and never reach wrapper-lite, so one visitor (e.g. batch-downloading whole artists) cannot use up a shared wrapper-lite; rejected requests are logged as `client <ip> over N/min`
+- ✨ `--client-ip-header`: take the client IP from a header set by the reverse proxy (e.g. `X-Real-IP`, `CF-Connecting-IP`); the TCP peer address by default
+
+### Fixes
+- 🐛 wrapper-lite concurrency limit: a request that timed out, failed while reading the response, or was cancelled (client disconnected) returned its permit at once while wrapper-lite might still be processing it, so under a slow upstream the real concurrency exceeded `--wrapper-concurrency` (a public wrapper-lite then answered `rate limited (concurrency)` and later `banned`). Such permits are now held for 30 more seconds; a complete reply or a connect failure still returns it at once. The `wrapper-lite THROTTLED` line shows the held count
+
 ## v0.5.1 (2026-10-19)
 
 ### New

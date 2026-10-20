@@ -1,5 +1,45 @@
 # 更新日志
 
+## v0.5.5 (2026-10-19)
+
+### 变更
+- 💄 播放栏仿照 music.apple.com 重做为悬浮的玻璃胶囊（高 56px，最宽 720px）：左侧播放控制、中间 LCD、右侧操作
+  - LCD 带 34px 封面、两行滚动标题与 2px 进度线，悬停或拖动时展开为 7px 并显示时间
+  - 音量改为喇叭按钮加滑出的滑块，点击静音
+  - 播放提示（FLAC 转码、多声道 PCM）移入模式徽标后的弹出框，只在第一次自动显示；播放错误浮在播放栏上方
+  - 760px 及以下改用紧凑的迷你播放器布局
+- 💄 歌曲页仿照 music.apple.com 重做
+  - 页头：208px 封面（1260px 以上 300px）带光晕，手机上居中；标题、可点击的艺人、专辑 · 年份 · 流派与音频特性徽标；页面按封面颜色着色，与专辑页一致
+  - 播放按钮在歌曲播放时变为暂停；收藏按钮与「更多」菜单（资料库、播放列表、下载、复制链接、在 Apple Music 中打开）取代原来的一排按钮
+  - 音质列表按格式分组为圆角卡片，行样式与专辑曲目行一致；每行有下载按钮，进度环点击即取消；「更多」菜单新增「复制 m3u8 链接」；加载时显示骨架行
+  - 新增制作人员、信息、音乐视频与「更多作品」栏目
+
+## v0.5.4 (2026-10-19)
+
+### 新功能
+- ✨ 首选音质新增 AAC 128 kbps、AAC 双耳 128 kbps、HE-AAC 双耳 64 kbps、AAC 缩混 128 kbps、HE-AAC 缩混 64 kbps（Apple 的 master 本来就有这些版本，之前同类中总是取最高码率），共 11 项；设置中心与下载对话框的下拉框按「无损与全景声 / AAC 立体声 / AAC 双耳 / AAC 缩混」分组，说明中给出每分钟的大致文件大小。新选项各有降级顺序，例如普通歌曲没有双耳 128 时依次改用 HE 双耳、立体声 128（#4）
+- 📝 README 加入 Telegram 交流群 [@apple_music_alac](https://t.me/apple_music_alac)
+
+### 修复
+- 🐛 部分较早的 MV（如 1175186184）的 media playlist 没有 `EXT-X-KEY`，之前报错 “No PlayReady media found”，现在可以播放与下载
+
+## v0.5.3 (2026-10-19)
+
+### 新功能
+- ✨ `--client-concurrency`：每个客户端 IP 同时转发 wrapper-lite 的请求上限（不含 `/status`），超出的排队等待而不是失败；与按分钟计的 `--client-rate` 配合，单个访客突发时不会占满 `--wrapper-concurrency` 的名额、堵住其他用户。排队的请求在日志中标出 `QUEUED … by client concurrency`
+
+### 修复
+- 🐛 `/status` 不计入 `--client-rate`，客户端却可以一直刷它、每次都请求 wrapper-lite，占用 `--wrapper-rate` 与并发名额：现在所有客户端共用同一结果 10 秒，同时到达的请求合并为一次，wrapper-lite 每 10 秒最多收到一次 `/status`；上游 `/status` 另设 10 秒超时
+
+## v0.5.2 (2026-10-19)
+
+### 新功能
+- ✨ `--client-rate`：每个客户端 IP 任意 60 秒内转发 wrapper-lite 的请求上限（不含 `/status`），超出时返回 HTTP 429 与 `Retry-After`、不再发往 wrapper-lite，免得单个访客（如批量扒取整个艺人）用光共用的 wrapper-lite；被拒绝的请求在日志中标出 `client <ip> over N/min`
+- ✨ `--client-ip-header`：从反向代理设置的请求头（如 `X-Real-IP`、`CF-Connecting-IP`）取客户端 IP，默认用 TCP 对端地址
+
+### 修复
+- 🐛 wrapper-lite 限并发：超时、读响应出错或被取消（客户端断开）的请求立即归还并发名额，而 wrapper-lite 上可能仍在处理，上游变慢时实际并发会超过 `--wrapper-concurrency`（公共 wrapper-lite 因此返回 `rate limited (concurrency)` 乃至 `banned`）：现在这类请求的名额再保留 30 秒才归还，正常结束或连接失败时仍立即归还；`wrapper-lite THROTTLED` 一行显示保留的数量
+
 ## v0.5.1 (2026-10-19)
 
 ### 新功能
