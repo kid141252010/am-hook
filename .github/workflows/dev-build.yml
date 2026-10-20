@@ -1,0 +1,99 @@
+name: Dev Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: am-hook.exe
+            asset_name: am-hook-windows-x86_64.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: am-hook
+            asset_name: am-hook-linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_name: am-hook
+            asset_name: am-hook-linux-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: am-hook
+            asset_name: am-hook-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: am-hook
+            asset_name: am-hook-macos-aarch64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v6
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          ASSET_NAME="${{ matrix.asset_name }}"
+
+          if [[ "$ASSET_NAME" == *.exe ]]; then
+            BASE_NAME="${ASSET_NAME%.exe}"
+            BASE_NAME="${BASE_NAME#am-hook-}"
+            DEV_FILE="am-hook-dev-${BASE_NAME}-${SHORT_SHA}.exe"
+          else
+            BASE_NAME="${ASSET_NAME#am-hook-}"
+            DEV_FILE="am-hook-dev-${BASE_NAME}-${SHORT_SHA}"
+          fi
+
+          echo "DEV_FILE=$DEV_FILE" >> "$GITHUB_ENV"
+
+          cd target/${{ matrix.target }}/release
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            cp am-hook.exe ../../../$DEV_FILE
+          else
+            cp am-hook ../../../$DEV_FILE
+            chmod +x ../../../$DEV_FILE
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.DEV_FILE }}
+          path: ${{ env.DEV_FILE }}
+          retention-days: 30
