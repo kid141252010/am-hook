@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## v0.5.7 (2026-10-21)
+
+### New
+- ✨ "Check ALAC" can also check the master m3u8 from wrapper-lite: it may be packaged differently from the web API's (amp-api `enhancedHls`) and sometimes has a better ALAC (`1679278167`: 24/48 on the web, also 24/96 via wrapper-lite). The same best ALAC is checked once; different ones are both listed and the better one is marked
+- ✨ ALAC check on playlist and song pages and in songs' More menu (albums, playlists, search and more)
+- ✨ The song page compares the web API's master with wrapper-lite's, tags qualities only wrapper-lite has and can copy the web master URL
+- ✨ Settings: turn off the ALAC END-tag repair of downloads; check ALAC while downloading and write the result to a custom tag (`ALAC_CHECK` by default), also shown in the download center; the check reads the downloaded data itself, with no extra requests
+
+### Changed
+- 💄 The check dialog no longer starts by itself: select all, none or some tracks; it shows the region, the album / playlist / song ID, song IDs and the check time; the options are one line of short labels with the explanations under "About", and each source's result is a card
+
+## v0.5.6 (2026-10-20)
+
+### New
+- ✨ "Check ALAC" on album pages (the waveform button next to Play and Shuffle): finds the escape frames whose end was overwritten in every track's best ALAC stream ([AppleMusicDecrypt#136](https://github.com/WorldObservationLog/AppleMusicDecrypt/issues/136)), without wrapper-lite and without requesting `/key`
+  - The master m3u8 comes from amp-api's `extendedAssetUrls.enhancedHls`; only each segment's moof is downloaded, plus the last 4 bytes (the part cbcs leaves unencrypted) of samples larger than one frame of PCM, about 80 KB for a 16-bit / 44.1 kHz track
+  - Tells "END tag missing" (FFmpeg and others drop the frame) from "Hidden damage" (the END tag happens to be `111` but the padding is not zero: it decodes, but the last sample is wrong), lists frame numbers, times and the last 4 bytes, and copies a text report
+  - Shows the packaging date (creation time in the init segment's `mvhd`) and the packager version (`swre`)
+  - Optionally decrypts the first segment (about 15 s) with the fixed key and decodes it to measure the real bit depth (low bits always zero?) and bandwidth (highest frequency above the quantization noise; a steep drop suggests upsampling or a lossy source), with a spectrum chart
+
+### Changed
+- 📝 The README now describes the ALAC end-tag repair accurately: restoring the END tag only stops decoders from dropping the frame; the overwritten last sample cannot be restored
+
 ## v0.5.5 (2026-10-19)
 
 ### Changed
