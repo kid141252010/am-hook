@@ -18,7 +18,7 @@
 //   downloads.stats()            { active, queued, done, failed, total, ratio, speed }
 //   downloads.folder             保存到文件夹：{ supported, name(), pick() }
 
-import { prefs } from './prefs.mjs';
+import { prefs, classify, pickVariant } from './prefs.mjs';
 import { buildIlst, imageType } from './mp4-tags.mjs';
 import { buildZip, crc32 } from './zip.mjs';
 import { formatPath, formatName, fitFolder, fitFile } from './naming.mjs';
@@ -62,60 +62,7 @@ const playable = (r) => playableSong(r) || playableMv(r);
 /** 只有一首（一个 MV）的任务：不打包，不建专辑文件夹（保存到文件夹时除外） */
 const single = (job) => job.kind === 'song' || job.kind === 'music-video';
 
-/* ---------- 音质选择 ---------- */
-/** master 变体的种类与排序值（GROUP-ID：audio-alac-stereo-96000-24、audio-atmos-2768、audio-stereo-256[-binaural|-downmix]、audio-HE-stereo-64…） */
-function classify(v) {
-  const g = (v.group_id || '').toLowerCase();
-  if (g.includes('alac')) return { kind: 'alac', rank: (v.sample_rate || 0) * 100 + (v.bit_depth || 0) };
-  if (g.includes('atmos')) return { kind: 'atmos', rank: Number((g.match(/atmos-(\d+)/) || [])[1]) || 0 };
-  const kbps = Number((g.match(/stereo-(\d+)/) || [])[1]) || 0;
-  const he = g.includes('he-');
-  if (g.includes('binaural')) return { kind: he ? 'he-binaural' : 'aac-binaural', rank: kbps };
-  if (g.includes('downmix')) return { kind: he ? 'he-downmix' : 'aac-downmix', rank: kbps };
-  return { kind: he ? 'aac-he' : 'aac', rank: kbps };
-}
-
-/** 带码率上限的首选音质（master 有 audio-stereo-128[-binaural|-downmix]）；其余取值就是 classify 的种类 */
-const CAPPED = {
-  'aac-128': { kind: 'aac', kbps: 128 },
-  'aac-binaural-128': { kind: 'aac-binaural', kbps: 128 },
-  'aac-downmix-128': { kind: 'aac-downmix', kbps: 128 },
-};
-
-const FALLBACK = {
-  alac: ['alac', 'aac', 'aac-he'],
-  atmos: ['atmos', 'alac', 'aac', 'aac-he'],
-  aac: ['aac', 'aac-he', 'alac'],
-  'aac-128': ['aac-128', 'aac-he', 'aac', 'alac'],
-  'aac-he': ['aac-he', 'aac-128', 'aac', 'alac'],
-  'aac-binaural': ['aac-binaural', 'aac', 'aac-he', 'alac'],
-  'aac-binaural-128': ['aac-binaural-128', 'he-binaural', 'aac-128', 'aac-he', 'aac', 'alac'],
-  'he-binaural': ['he-binaural', 'aac-binaural-128', 'aac-he', 'aac-128', 'aac', 'alac'],
-  'aac-downmix': ['aac-downmix', 'aac', 'aac-he', 'alac'],
-  'aac-downmix-128': ['aac-downmix-128', 'he-downmix', 'aac-128', 'aac-he', 'aac', 'alac'],
-  'he-downmix': ['he-downmix', 'aac-downmix-128', 'aac-he', 'aac-128', 'aac', 'alac'],
-};
-
-/**
- * 按首选音质（及上限）选变体；fallback 时依次降级。返回 { variant, fallback } 或 null。
- * 没有 master 的歌曲只有 /webplayback 的 AAC-LC（wrapper.js），与参考实现一样不论设置都下载它
- */
-export function pickVariant(variants, { codec, alacMax, atmosMax, fallback }) {
-  if (variants.length === 1 && variants[0].widevine) return { variant: variants[0], fallback: codec !== 'aac' };
-  const order = fallback ? FALLBACK[codec] || [codec] : [codec];
-  for (const choice of order) {
-    const { kind, kbps } = CAPPED[choice] || { kind: choice };
-    const list = variants.map((v) => ({ v, c: classify(v) })).filter(({ v, c }) => c.kind === kind
-      && (kind !== 'alac' || !v.sample_rate || v.sample_rate <= alacMax)
-      && (kind !== 'atmos' || c.rank <= atmosMax)
-      && (!kbps || c.rank <= kbps));
-    if (!list.length) continue;
-    list.sort((a, b) => b.c.rank - a.c.rank || (b.v.bandwidth || 0) - (a.v.bandwidth || 0));
-    return { variant: list[0].v, fallback: choice !== codec };
-  }
-  return null;
-}
-
+/* ---------- 音质 ---------- */
 /** 文件名变量 codec / quality / bit_depth / sample_rate */
 function qualityVars(v) {
   const { kind, rank } = classify(v);
@@ -427,6 +374,8 @@ async function prepare(job, spec) {
         total: 0,
         attempts: 0,
         quality: '',
+        // 下载时检测 ALAC 的结论：{ bad }（缺陷帧数）或 { failed: true }；未检测时为 null
+        check: null,
         error: '',
       };
     });
@@ -566,6 +515,7 @@ async function runTask(job, task) {
   if (!AbortSignal.any) job.ctl.signal.addEventListener('abort', () => task.ctl.abort(), { once: true });
   task.attempts++;
   task.error = '';
+  task.check = null;
   task.done = 0;
   task.total = 0;
   try {
@@ -642,7 +592,9 @@ async function downloadSong(job, task, info, signal) {
 
   // 封面、歌词与 ALAC 检测（设置中心「下载时检测 ALAC」）与音频同时获取
   const embed = new Set(o.embed);
-  const wantLyrics = embed.has('lyrics') || o.saveLyrics;
+  // amp-api 明确标出没有歌词（hasLyrics: false）的歌曲不去 wrapper-lite 取；没有这个字段时照常获取
+  const noLyrics = task.song && task.song.attributes && task.song.attributes.hasLyrics === false;
+  const wantLyrics = (embed.has('lyrics') || o.saveLyrics) && !noLyrics;
   const coverPromise = coverFor(job, info, signal, embed.has('cover') || (o.saveCover && job.kind !== 'playlist'));
   const lyricsPromise = wantLyrics ? fetchLyrics(job, task, signal) : Promise.resolve(null);
   const finishCheck = o.alacCheckTag && classify(v).kind === 'alac' ? checkWhileDownloading(task, track, v, o) : null;
@@ -672,7 +624,7 @@ async function downloadSong(job, task, info, signal) {
 /**
  * 下载 ALAC 时检测原样帧：下载取得的原始分段在解密、修复之前经 track.inspect 交给 createFragmentScanner
  * （alac-check.mjs），不另发请求，结论与「检测 ALAC」相同。返回 finish()：全部分段下载完后调用，
- * 给出写入标签的文字（见 tagValue；检测失败时为 result=error），结论同时附在下载中心的音质说明后
+ * 给出写入标签的文字（见 tagValue；检测失败时为 result=error），结论同时记在 task.check，显示在下载中心
  */
 function checkWhileDownloading(task, track, v, o) {
   const scanner = createFragmentScanner(track.segments.length);
@@ -682,15 +634,13 @@ function checkWhileDownloading(task, track, v, o) {
     else if (index.has(piece)) scanner.segment(index.get(piece), bytes);
   };
   return () => {
-    const quality = task.quality;
     try {
       const result = scanner.result(v);
-      const bad = result.escapes.filter((e) => DEFECTS.has(e.verdict)).length;
-      task.quality = `${quality} · ${bad ? t('dlc.checkBad', { n: bad }) : t('dlc.checkOk')}`;
+      task.check = { bad: result.escapes.filter((e) => DEFECTS.has(e.verdict)).length };
       return tagValue(result, { repair: o.alacRepair });
     } catch (err) {
       console.warn('[am-hook] ALAC 检测失败', task.id, err);
-      task.quality = `${quality} · ${t('dlc.checkFailed')}`;
+      task.check = { failed: true };
       return `result=error; error=${String((err && err.message) || err).replace(/[;=]/g, ' ')}; by=am-hook`;
     } finally {
       notify();
@@ -739,12 +689,33 @@ async function downloadVideo(job, task, info, signal) {
   });
 }
 
-/** 歌词：wrapper-lite 返回逐字 TTML，按设置转为 LRC（嵌入的也是 LRC） */
+/** 歌词获取失败（不含没有歌词的 404）时的总尝试次数 */
+const LYRICS_ATTEMPTS = 3;
+
+/** 等待 ms 毫秒；取消时立即以 AbortError 结束 */
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+  });
+}
+
+/** 歌词：wrapper-lite 返回逐字 TTML，按设置转为 LRC（嵌入的也是 LRC）；获取失败时间隔 1 秒、2 秒重试 */
 async function fetchLyrics(job, task, signal) {
   const o = job.options;
   try {
     const lang = o.lyricsLang || job.lang || undefined;
-    const ttml = await AmWrapper.lyrics(task.id, lang, signal);
+    let ttml;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        ttml = await AmWrapper.lyrics(task.id, lang, signal);
+        break;
+      } catch (err) {
+        if (signal.aborted || attempt >= LYRICS_ATTEMPTS) throw err;
+        console.warn(`[am-hook] 歌词获取失败，${attempt} 秒后重试`, err);
+        await wait(1000 * attempt, signal);
+      }
+    }
     if (!ttml) return null;
     let lrc = '';
     try {

@@ -1,7 +1,7 @@
 // 设置中心（/settings），由 app.mjs 挂载。通用设置（主地区、曲库语言、界面语言、wrapper-lite）沿用导航底部的选择面板；
 // 下载设置（音质、MV、保存方式、文件名、标签、封面、歌词）保存在 prefs.mjs，修改立即生效（进行中的下载沿用开始时的设置）。
-import { prefs, OPTIONS, CODEC_GROUPS, TAG_FIELDS, TAG_NAME, DEFAULTS } from '../prefs.mjs';
-import { formatPath, fitFolder, fitFile, TEMPLATE_VARS } from '../naming.mjs';
+import { prefs, OPTIONS, CODEC_GROUPS, TAG_FIELDS, TAG_NAME, DEFAULTS, DEFAULT_FALLBACK } from '../prefs.mjs';
+import { formatPath, fitFolder, fitFile, templateIssues, TEMPLATE_VAR_GROUPS, TEMPLATE_SCOPES } from '../naming.mjs';
 import { downloads } from '../downloads.mjs';
 import { userToken, askToken, onTokenChange } from '../station.mjs';
 
@@ -32,7 +32,7 @@ export function mount({ root, signal, onLangChange, toast }) {
   const host = root.querySelector('#download');
   /** 控件：每项设置变化后刷新显示（正在输入的文本框除外） */
   const controls = [];
-  let lastTemplate = null;
+  let openVars = null;
   let resetArmed = false;
 
   // 电台的 media-user-token：显示是否已填写（只露出末尾几位），点击修改或清除
@@ -115,25 +115,118 @@ export function mount({ root, signal, onLangChange, toast }) {
     return group;
   }
 
+  /** 模板可用的变量：按组列出该模板适用的，点击插入到光标处；ID 一组默认收起 */
+  function templateVars(key, input) {
+    const scope = TEMPLATE_SCOPES[key];
+    const chip = (name) => {
+      const b = el('button', { type: 'button', className: 'set-var', textContent: `{${name}}`, title: t(`set.var.${name}`) });
+      b.addEventListener('mousedown', (e) => e.preventDefault()); // 保留文本框的焦点与光标
+      b.addEventListener('click', () => {
+        const token = name === 'tracknum' || name === 'index' ? `{${name}:02d}` : `{${name}}`;
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        input.setRangeText(token, start, end, 'end');
+        input.dispatchEvent(new Event('input'));
+        input.dispatchEvent(new Event('change'));
+        input.focus();
+      });
+      return b;
+    };
+    const groups = TEMPLATE_VAR_GROUPS.map(([id, names]) => [id, names.filter((name) => scope.includes(name))]).filter(([, names]) => names.length)
+      .map(([id, names]) => {
+        const chips = el('div', { className: 'set-vars' }, ...names.map(chip));
+        if (id === 'id') return el('details', { className: 'set-var-group' }, el('summary', { className: 'set-var-label', textContent: t(`set.varGroup.${id}`) }), chips);
+        return el('div', { className: 'set-var-group' }, el('span', { className: 'set-var-label', textContent: t(`set.varGroup.${id}`) }), chips);
+      });
+    return el('div', { className: 'set-var-panel', hidden: true }, ...groups, el('span', { className: 'set-desc', textContent: t('set.varsDesc') }));
+  }
+
   // 预览与实际下载一致：按路径长度限制截断后的结果（文件名按其所在的专辑 / 歌单文件夹计算）
   function template(key, label, kind, folderKey) {
     const input = el('input', { type: 'text', className: 'set-input set-template', spellcheck: false, autocomplete: 'off' });
     input.setAttribute('aria-label', label);
     const preview = el('div', { className: 'set-preview' });
+    const warn = el('div', { className: 'set-template-warn', hidden: true });
+    const vars = templateVars(key, input);
     let saved = {};
     const update = () => {
       const value = input.value.trim() || DEFAULTS.download[key];
       const folder = () => fitFolder(formatPath(saved[folderKey] || DEFAULTS.download[folderKey], SAMPLE));
       const path = kind === 'file' ? fitFile(folder(), formatPath(value, SAMPLE)) : fitFolder(formatPath(value, SAMPLE));
       preview.textContent = kind === 'file' ? `${path.join('/')}.m4a` : kind === 'zip' ? `${path.join(' - ')}.zip  ·  ${path.join('/')}/` : path.join('/');
+      const { unknown, outside } = templateIssues(key, value);
+      const names = (list) => list.map((name) => `{${name}}`).join(' ');
+      warn.replaceChildren(...[
+        unknown.length && t('set.varUnknown', { names: names(unknown) }),
+        outside.length && t('set.varOutside', { names: names(outside) }),
+      ].filter(Boolean).map((text) => el('div', { textContent: text })));
+      warn.hidden = !warn.childElementCount;
     };
-    input.addEventListener('focus', () => { lastTemplate = input; });
+    // 同一时间只展开一个模板的变量：最近获得焦点的那个
+    input.addEventListener('focus', () => {
+      if (openVars && openVars !== vars) openVars.hidden = true;
+      vars.hidden = false;
+      openVars = vars;
+    });
     input.addEventListener('input', update);
     input.addEventListener('change', () => { set({ [key]: input.value.trim() || DEFAULTS.download[key] }); });
     controls.push((v) => { saved = v; if (document.activeElement !== input) input.value = v[key]; update(); });
     const reset = el('button', { type: 'button', className: 'set-mini', textContent: t('set.default'), title: DEFAULTS.download[key] });
     reset.addEventListener('click', () => { input.value = DEFAULTS.download[key]; set({ [key]: DEFAULTS.download[key] }); });
-    return el('div', { className: 'set-template-box' }, el('div', { className: 'set-template-line' }, input, reset), preview);
+    return el('div', { className: 'set-template-box' }, el('div', { className: 'set-template-line' }, input, reset), vars, preview, warn);
+  }
+
+  /** 降级顺序：当前首选音质之后依次尝试的音质，可上移、下移、移除、添加；按首选音质分别保存 */
+  function fallbackOrder() {
+    const list = el('ol', { className: 'set-chain' });
+    const add = el('select', { className: 'set-select set-chain-add' });
+    add.setAttribute('aria-label', t('set.fallbackAdd'));
+    const reset = el('button', { type: 'button', className: 'set-mini', textContent: t('set.default') });
+    const chain = (v) => (Array.isArray(v.fallbackOrder[v.codec]) ? v.fallbackOrder[v.codec] : DEFAULT_FALLBACK[v.codec] || []);
+    const save = (next) => {
+      const v = get();
+      set({ fallbackOrder: { ...v.fallbackOrder, [v.codec]: next } });
+    };
+    const mini = (text, label, disabled, fn) => {
+      const b = el('button', { type: 'button', className: 'set-mini set-chain-btn', textContent: text, title: label, disabled });
+      b.setAttribute('aria-label', label);
+      b.addEventListener('click', fn);
+      return b;
+    };
+    add.addEventListener('change', () => { if (add.value) save([...chain(get()), add.value]); });
+    reset.addEventListener('click', () => {
+      const v = get();
+      const { [v.codec]: _, ...rest } = v.fallbackOrder;
+      set({ fallbackOrder: rest });
+    });
+    controls.push((v) => {
+      const items = chain(v);
+      const move = (i, d) => {
+        const next = [...items];
+        [next[i], next[i + d]] = [next[i + d], next[i]];
+        save(next);
+      };
+      list.replaceChildren(
+        el('li', { className: 'set-chain-item is-first' },
+          el('span', { className: 'set-chain-tag', textContent: t('set.fallbackFirst') }),
+          el('span', { className: 'set-chain-name', textContent: t(`set.codec.${v.codec}`) })),
+        ...items.map((c, i) => el('li', { className: 'set-chain-item' },
+          el('span', { className: 'set-chain-tag', textContent: String(i + 1) }),
+          el('span', { className: 'set-chain-name', textContent: t(`set.codec.${c}`) }),
+          mini('↑', t('set.fallbackUp'), i === 0, () => move(i, -1)),
+          mini('↓', t('set.fallbackDown'), i === items.length - 1, () => move(i, 1)),
+          mini('✕', t('set.fallbackRemove'), false, () => save(items.filter((x) => x !== c))))),
+        ...(items.length ? [] : [el('li', { className: 'set-chain-empty', textContent: t('set.fallbackEmpty') })]));
+      // 添加：其余音质按首选音质下拉框的分组列出
+      const rest = (c) => c !== v.codec && !items.includes(c);
+      add.replaceChildren(el('option', { value: '', textContent: t('set.fallbackAdd') }),
+        ...CODEC_GROUPS.filter(([, codecs]) => codecs.some(rest)).map(([group, codecs]) => el('optgroup', { label: t(`set.codecGroup.${group}`) },
+          ...codecs.filter(rest).map((c) => el('option', { value: c, textContent: t(`set.codec.${c}`) })))));
+      add.value = '';
+      add.disabled = !OPTIONS.download.codec.some(rest);
+      reset.disabled = !Array.isArray(v.fallbackOrder[v.codec]);
+    });
+    return el('div', { className: 'set-chain-box' }, list, el('div', { className: 'set-mini-row' }, add, reset));
   }
 
   function section(id, titleKey, ...rows) {
@@ -148,11 +241,14 @@ export function mount({ root, signal, onLangChange, toast }) {
 
     // 检测结果的标签名：清空时恢复默认
     const tagNameRow = row(t('set.alacCheckTagName'), t('set.alacCheckTagNameDesc'), text('alacCheckTagName', DEFAULTS.download.alacCheckTagName, t('set.alacCheckTagName'), TAG_NAME));
+    const orderRow = row(t('set.fallbackOrder'), t('set.fallbackOrderDesc'), fallbackOrder(), { wide: true });
+    controls.push((v) => { orderRow.hidden = !v.fallback; });
     const quality = section('quality', 'set.quality',
       row(t('set.codec'), t('set.codecDesc'), select('codec', CODEC_GROUPS.map(([group, list]) => [t(`set.codecGroup.${group}`), list.map((c) => [c, t(`set.codec.${c}`)])]))),
       row(t('set.alacMax'), t('set.alacMaxDesc'), select('alacMax', o.alacMax.map((n) => [n, `${n / 1000} kHz`]))),
       row(t('set.atmosMax'), t('set.atmosMaxDesc'), select('atmosMax', o.atmosMax.map((n) => [n, `${n} (${n % 1000} kbps)`]))),
       row(t('set.fallback'), t('set.fallbackDesc'), toggle('fallback', t('set.fallback'))),
+      orderRow,
       row(t('set.alacRepair'), t('set.alacRepairDesc'), toggle('alacRepair', t('set.alacRepair'))),
       row(t('set.alacCheckTag'), t('set.alacCheckTagDesc'), toggle('alacCheckTag', t('set.alacCheckTag'))),
       tagNameRow);
@@ -200,32 +296,13 @@ export function mount({ root, signal, onLangChange, toast }) {
       skipRow.hidden = !folder;
     });
 
-    // 文件名：模板 + 预览；点击变量插入到最近编辑的模板中
-    const chips = el('div', { className: 'set-vars' }, ...TEMPLATE_VARS.map((name) => {
-      const chip = el('button', { type: 'button', className: 'set-var', textContent: `{${name}}`, title: t(`set.var.${name}`) });
-      chip.addEventListener('mousedown', (e) => e.preventDefault()); // 保留文本框的焦点与光标
-      chip.addEventListener('click', () => {
-        const input = lastTemplate;
-        if (!input) return;
-        const token = name === 'tracknum' || name === 'index' ? `{${name}:02d}` : `{${name}}`;
-        const start = input.selectionStart ?? input.value.length;
-        const end = input.selectionEnd ?? start;
-        input.setRangeText(token, start, end, 'end');
-        input.dispatchEvent(new Event('input'));
-        input.dispatchEvent(new Event('change'));
-        input.focus();
-      });
-      return chip;
-    }));
+    // 文件名：模板 + 可用变量 + 预览
     const naming = section('naming', 'set.naming',
       row(t('set.albumFolder'), t('set.albumFolderDesc'), template('albumFolder', t('set.albumFolder'), 'zip'), { wide: true }),
       row(t('set.songFile'), t('set.songFileDesc'), template('songFile', t('set.songFile'), 'file', 'albumFolder'), { wide: true }),
       row(t('set.playlistFolder'), '', template('playlistFolder', t('set.playlistFolder'), 'zip'), { wide: true }),
       row(t('set.playlistFile'), '', template('playlistFile', t('set.playlistFile'), 'file', 'playlistFolder'), { wide: true }),
-      row(t('set.singleFile'), t('set.singleFileDesc'), template('singleFile', t('set.singleFile'), 'file', 'albumFolder'), { wide: true }),
-      el('div', { className: 'set-row set-row-wide set-vars-row' },
-        el('span', { className: 'set-label' }, el('span', { textContent: t('set.vars') }), el('span', { className: 'set-desc', textContent: t('set.varsDesc') })),
-        chips));
+      row(t('set.singleFile'), t('set.singleFileDesc'), template('singleFile', t('set.singleFile'), 'file', 'albumFolder'), { wide: true }));
 
     // 标签：嵌入字段
     const checks = TAG_FIELDS.map((field) => {

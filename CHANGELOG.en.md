@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## v0.5.9 (2026-10-23)
+
+### New
+- ✨ Settings, File names: variables now follow the template being edited and list only the ones it supports (e.g. the playlist folder has just the playlist name, curator and playlist ID), grouped by song / album / quality / playlist / ID with IDs collapsed; the preview warns about unknown variables and ones that don't apply to that template
+- ✨ Playback errors show a retry countdown and a "Retry now" button
+
+### Fixes
+- 🐛 Segment or key load failures were retried every 3 s forever, and pumps while buffered audio was still playing bypassed the timer: retries now back off 3 / 6 / 12 / 24 / 48 s with jitter and stop after 5 attempts
+
+### Changed
+- ♻️ The FairPlay key used for the leading segments (`P000000000/s1/e1`) is now called the prefetch key: it does not always cover only the first segment (some songs switch to the track key at the third). Decryption already followed each segment's own EXT-X-KEY; only names and wording changed (including the ALAC check option)
+
+## v0.5.8 (2026-10-22)
+
+### New
+- ✨ Settings: a "Fallback order" list under "Fall back when missing" shows the preferred quality and the qualities tried after it; each can be moved up / down or removed, others added, and "Default" restores the built-in order. Orders are saved per preferred quality, so a quality picked in the download dialog uses its own; an empty order means no fallback
+- ✨ The download center shows ALAC check results in full (no truncation; on narrow screens they wrap under the title with the quality), and album / playlist cards show a check summary
+
+### Fixes
+- 🐛 Songs without a master only have the Widevine AAC-LC 256 from `/webplayback` (e.g. cn `1569279827`) and were downloaded at AAC 256 whatever the settings: they now follow the same order as other qualities and are downloaded only when AAC 256 is preferred or in the fallback order, otherwise skipped
+
+### Changed
+- ⚡ Songs that amp-api marks `hasLyrics: false` no longer request lyrics from wrapper-lite; a failed lyrics fetch (other than 404) is tried up to 3 times, 1 s and 2 s apart, and stops at once when the download is cancelled
+
 ## v0.5.7 (2026-10-21)
 
 ### New
