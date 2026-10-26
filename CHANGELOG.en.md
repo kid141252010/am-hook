@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v0.6.2 (2026-10-25)
+
+### Fixes
+- 🐛 On Android Chrome, spatial scene controls took about 1 s to be heard: the low-latency JOC playback's AudioContext now uses `latencyHint: 'interactive'`, cutting output latency from ~0.35 s to ~0.04 s and no longer starving (and growing the lead) as the output pulls audio in large blocks, so turning your head is heard after ~0.17 s; other playback methods keep `'playback'`
+
+## v0.6.1 (2026-10-24)
+
+### New
+- ✨ Dolby Atmos object rendering (JOC, from [am-hook-joc](https://github.com/TheM14/am-hook-joc)), off by default: pick Speaker 2.0 or Binaural under Settings → JOC object rendering, and E-AC-3 (Dolby Atmos) songs are rendered in the browser, rebuilding 15 objects plus LFE from the stream's JOC and object metadata and rendering them to stereo; Binaural uses the 20 HRTFs of the University of York SADIE II database (D2 by default) with early reflections and a room. Mode, HRTF and output attenuation apply to the playing song at once, also switchable in the full-screen player's quality panel; the player warns once per song if the output clips at the current volume
+- ✨ Spatial scene (quality panel → "Spatial scene", binaural): a 3D view of a virtual head among the 15 objects, which move with their live positions and glow with their level. Drag to turn your head and every object's HRTF and room reflections follow the new orientation, audible about 0.15 s later; walk around the room (objects get louder as you approach), first-person view, click an orb to solo / mute it, focus on the objects you face, exaggerate the elevation, tour, or turn with the gyroscope on a phone
+- ⚡ With AudioWorklet available (HTTPS or localhost), JOC renders frame by frame along the playback position, only ~0.1 s ahead, so interactive changes take effect at once; otherwise it still renders fragments ahead
+
+## v0.6.0 (2026-10-24)
+
+### New
+- ✨ The full-screen player is rebuilt on AMLL react-full: a horizontal layout (cover, title and controls on the left, lyrics on the right, toggles along the bottom; the left column slides to the centre when lyrics are hidden) and a vertical layout (small cover above the lyrics, or a big cover, moving on a spring); react-full icons and press animations for play/pause, previous/next (arrow animation), shuffle, repeat and the lyrics and queue toggles, stretchy progress and volume sliders; slides in and out, drag the handle down to close on touch, click the total time for remaining time, and the queue opens in the lyrics area on desktop too
+- ✨ The full-screen player shows a quality badge under the progress bar; click it for the current quality's specs and playback method, plus the song's other qualities to switch to
+
+### Changed
+- 💄 The bottom player bar uses the full-screen player's icons (playback controls, shuffle / repeat, lyrics, queue, volume); shuffle and repeat show a filled rounded square when on. The quality badge is no longer shown on the bar
+- 💄 The Dolby Atmos quality icon is now the one-line "Dolby Atmos" wordmark, sized to match the other quality icons
+
 ## v0.5.9 (2026-10-23)
 
 ### New
