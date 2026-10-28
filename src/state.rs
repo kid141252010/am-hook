@@ -4,6 +4,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct Config {
     pub wrapper_url: String,
+    pub amll_api: String,
     /// amp-api 连接空闲时的保活周期，0 表示不发送保活请求
     pub amp_keepalive: Duration,
     /// amp-api 响应缓存容量（MB），0 表示不缓存
@@ -47,6 +48,7 @@ impl AppState {
     pub fn new(wrapper_url: String) -> Self {
         Self::with_config(Config {
             wrapper_url: wrapper_url.trim_end_matches('/').to_string(),
+            amll_api: "https://api.amll.dev".into(),
             amp_keepalive: Duration::from_secs(30),
             amp_cache_mb: 32,
             wrapper_rate: 24,

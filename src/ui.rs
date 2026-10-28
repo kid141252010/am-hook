@@ -52,10 +52,10 @@ pub async fn fallback_handler(uri: Uri, headers: HeaderMap) -> Response<Body> {
 }
 
 /// 部署环境（window.AM_HOOK_HOST，见 src/ui/host.js）：服务端是否转发 wrapper-lite、不转发时页面本地模式的默认值，
-/// 以及本地设置上方的提示。`--wrapper-auth` 只用于服务端转发，从不交给页面
+/// 以及本地设置上方的提示和 AMLL 歌词库 API 地址。`--wrapper-auth` 只用于服务端转发，从不交给页面
 pub async fn host_js_handler(State(state): State<Arc<AppState>>) -> Response<Body> {
     let config = &state.config;
-    let mut host = json!({ "serverWrapper": config.wrapper_relay });
+    let mut host = json!({ "serverWrapper": config.wrapper_relay, "amllApi": config.amll_api });
     if !config.wrapper_relay {
         host["wrapper"] = json!({
             "url": config.wrapper_url,

@@ -47,6 +47,11 @@ pub struct Cli {
     #[arg(long, env = "AM_HOOK_WRAPPER_AUTH", hide_env_values = true)]
     pub wrapper_auth: Option<String>,
 
+    /// HTTP API address of AMLL TTML DB. The browser connects directly to it to fetch
+    /// lyrics when the page lyrics source is set to the AMLL lyrics library
+    #[arg(long, env = "AM_HOOK_AMLL_API", default_value = "https://api.amll.dev")]
+    pub amll_api: String,
+
     /// Max wrapper-lite requests relayed per client IP in any 60 seconds (/status not
     /// counted); further requests get HTTP 429 with Retry-After. 0 = unlimited
     #[arg(long, default_value_t = 0)]
@@ -103,6 +108,7 @@ impl Cli {
         };
         Ok(Config {
             wrapper_url: self.wrapper_url.trim_end_matches('/').to_string(),
+            amll_api: self.amll_api.trim_end_matches('/').to_string(),
             amp_keepalive: Duration::from_secs(self.amp_keepalive),
             amp_cache_mb: self.amp_cache_mb,
             wrapper_rate: self.wrapper_rate,
