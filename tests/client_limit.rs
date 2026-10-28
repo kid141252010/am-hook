@@ -11,6 +11,7 @@ use axum::Router;
 fn config(wrapper_url: String, ip_header: Option<&str>) -> Config {
     Config {
         wrapper_url,
+        amll_api: "https://api.amll.dev".into(),
         amp_keepalive: Duration::ZERO,
         amp_cache_mb: 0,
         wrapper_rate: 0,

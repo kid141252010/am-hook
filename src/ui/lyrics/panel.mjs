@@ -213,8 +213,9 @@ function savePrefs(prefs) {
   try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* 只在本次会话生效 */ }
 }
 
-/** AMLL TTML DB（https://amll.dev/reference/http-api/native）：按 Apple Music 歌曲 ID 取 TTML，未收录时为 null */
-const AMLL_API = 'https://api.amll.dev';
+/** AMLL TTML DB（https://amll.dev/reference/http-api/native）：地址可由部署配置；按 Apple Music 歌曲 ID 取 TTML，未收录时为 null */
+const HOST = window.AM_HOOK_HOST || {};
+const AMLL_API = typeof HOST.amllApi === 'string' && HOST.amllApi ? HOST.amllApi : 'https://api.amll.dev';
 async function fetchAmll(adamId) {
   const response = await fetch(`${AMLL_API}/v1/lyrics/get?appleMusicId=${encodeURIComponent(adamId)}`);
   if (response.status === 404) return null;

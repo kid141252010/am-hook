@@ -17,6 +17,7 @@ async fn serve(app: Router) -> String {
 fn config(wrapper_url: String, relay: bool) -> Config {
     Config {
         wrapper_url,
+        amll_api: "https://api.amll.dev".into(),
         amp_keepalive: Duration::ZERO,
         amp_cache_mb: 0,
         wrapper_rate: 5,
@@ -52,6 +53,7 @@ async fn local_wrapper_only_never_relays() {
         value,
         serde_json::json!({
             "serverWrapper": false,
+            "amllApi": "https://api.amll.dev",
             "wrapper": { "url": wrapper, "rate": 5, "concurrency": 3 },
             "hint": "Get a token at https://token.test",
         })
@@ -71,7 +73,7 @@ async fn local_wrapper_only_never_relays() {
     // 默认仍转发；host.js 不带本地模式默认值
     let relay = serve(am_hook::router(Arc::new(AppState::with_config(config(wrapper, true))))).await;
     let text = client.get(format!("{relay}/assets/host.js")).send().await.unwrap().text().await.unwrap();
-    assert_eq!(text, "window.AM_HOOK_HOST = {\"hint\":\"Get a token at https://token.test\",\"serverWrapper\":true};\n");
+    assert_eq!(text, "window.AM_HOOK_HOST = {\"amllApi\":\"https://api.amll.dev\",\"hint\":\"Get a token at https://token.test\",\"serverWrapper\":true};\n");
     assert_eq!(client.get(format!("{relay}/status")).send().await.unwrap().status(), 200);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

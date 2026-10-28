@@ -451,6 +451,7 @@ mod tests {
     fn config(url: String, rate: u32, concurrency: usize, auth: Option<&str>) -> Config {
         Config {
             wrapper_url: url,
+            amll_api: "https://api.amll.dev".into(),
             amp_keepalive: Duration::ZERO,
             amp_cache_mb: 0,
             wrapper_rate: rate,
