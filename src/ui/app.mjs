@@ -50,6 +50,7 @@ const VIEW_FILES = { new: 'browse', charts: 'browse', editorial: 'browse', radio
 const VIEWS = {
   home: ['/assets/views/home.html', () => import('/assets/views/home.mjs')],
   song: ['/assets/views/song.html', () => import('/assets/views/song.mjs')],
+  'qq-song': ['/assets/views/qq-song.html', () => import('/assets/views/qq-song.mjs')],
   mv: ['/assets/views/mv.html', () => import('/assets/views/mv.mjs')],
   album: ['/assets/views/album.html', () => import('/assets/views/album.mjs')],
   playlist: ['/assets/views/playlist.html', () => import('/assets/views/playlist.mjs')],
@@ -71,6 +72,7 @@ const LIBRARY_PLAYLIST_PATH = /^\/library\/(?:playlist\/p\.[0-9A-Za-z_-]+|favori
 function route(url) {
   if (url.origin !== location.origin) return null;
   if (url.pathname === '/') return 'home';
+  if (/^\/qq-song\/[0-9A-Za-z]{1,32}\/?$/.test(url.pathname)) return 'qq-song';
   // 「新发现」（跟随主地区）
   if (url.pathname === '/new') return 'new';
   // 广播（跟随主地区，与 src/links.rs 的 is_radio_path 相同）

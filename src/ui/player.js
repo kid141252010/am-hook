@@ -336,8 +336,12 @@
   async function resolveEntry(entry) {
     if (entry.source === 'qq') {
       if (!/^[0-9A-Za-z]{1,32}$/.test(entry.track)) throw new Error('Invalid QQ ID');
-      return { ...entry, source: 'qq', key: trackKey(entry), id: `qq:${entry.track}:HQ`,
-        title: entry.name, streamUrl: `/qq/song/${entry.track}/play`, label: 'QQ · HQ', variants: [] };
+      const quality = entry.quality ?? 'HQ';
+      if (!['HQ', 'SQ', 'WEB', 'NAC', 'RS'].includes(quality)) throw new Error('Invalid QQ quality');
+      return { ...entry, quality, source: 'qq', key: trackKey(entry), id: `qq:${entry.track}:${quality}`,
+        href: `/qq-song/${entry.track}`, title: entry.name,
+        streamUrl: `/qq/song/${entry.track}/play${entry.quality === undefined ? '' : `?quality=${quality}`}`,
+        label: `QQ · ${quality}`, variants: [] };
     }
     const { variants } = await global.AmWrapper.songMaster(entry.track);
     const best = sortVariants(variants).find((v) => detectMode(v.codecs));
@@ -1840,7 +1844,7 @@
     /** 播放方式：MSE · ALAC（浏览器直接解码）、ALAC → FLAC（转码）、E-AC-3 → 5.1 PCM（解码为多声道 PCM）、E-AC-3 → JOC（对象渲染） */
     modeText() {
       const c = this.current;
-      if (c.source === 'qq') return 'QQ · HQ';
+      if (c.source === 'qq') return c.label || `QQ · ${c.quality || 'HQ'}`;
       if (c.mode === 'joc2') return `E-AC-3 → ${t('player.jocSpeaker')}`;
       if (c.mode === 'jocbin') return `E-AC-3 → ${t('player.jocBinaural', { dataset: this.pcm ? this.pcm.dataset : jocSettings().dataset })}`;
       if (c.mode === 'flac') return 'ALAC → FLAC';
@@ -2255,13 +2259,20 @@
       list.addEventListener('click', (e) => {
         const row = rowOf(e.target);
         if (!row || !this.queue || this.queueDrag) return;
+        const entry = this.queue.entries[indexOf(row)];
         if (e.target.closest('.queue-remove')) this.removeQueueEntry(indexOf(row));
+        else if (e.target.closest('.queue-play')) this.playAt(indexOf(row));
+        else if (entry?.source === 'qq') {
+          if (e.target.closest('a')) return;
+          row.querySelector('.queue-name').click();
+        }
         else if (pointerType === 'mouse') this.selectQueueRow(row);
         else this.playAt(indexOf(row));
       });
       list.addEventListener('dblclick', (e) => {
         const row = rowOf(e.target);
-        if (row && this.queue && !e.target.closest('.queue-remove')) this.playAt(indexOf(row));
+        if (row && this.queue && this.queue.entries[indexOf(row)]?.source !== 'qq'
+          && !e.target.closest('.queue-remove')) this.playAt(indexOf(row));
       });
       list.addEventListener('keydown', (e) => {
         const row = rowOf(e.target);
@@ -2269,7 +2280,12 @@
         const index = indexOf(row);
         const rows = [...list.querySelectorAll('.queue-item')];
         const at = rows.indexOf(row);
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.playAt(index); return; }
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          if (this.queue.entries[index]?.source === 'qq' && e.key === 'Enter') row.querySelector('.queue-name').click();
+          else this.playAt(index);
+          return;
+        }
         if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); this.removeQueueEntry(index); return; }
         if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
         e.preventDefault();
@@ -2291,7 +2307,7 @@
       list.addEventListener('pointerdown', (e) => {
         pointerType = e.pointerType || 'mouse';
         const row = rowOf(e.target);
-        if (!row || !this.queue || e.button !== 0 || e.target.closest('.queue-remove')) return;
+        if (!row || !this.queue || e.button !== 0 || e.target.closest('button, a')) return;
         const entry = this.queue.entries[indexOf(row)];
         const grip = e.target.closest('.queue-grip');
         if (!entry || (!grip && pointerType !== 'mouse')) return;
@@ -2465,6 +2481,21 @@
           + `<span class="queue-time"></span><span class="queue-grip" aria-hidden="true">${ICON_GRIP}</span>`;
         const art = li.querySelector('.queue-art');
         if (entry.artwork) art.src = entry.artwork; else art.removeAttribute('src');
+        const name = li.querySelector('.queue-name');
+        if (entry.source === 'qq') {
+          li.title = t('qq.openSong');
+          const link = doc.createElement('a');
+          link.className = 'queue-name';
+          link.href = `/qq-song/${entry.track}`;
+          name.replaceWith(link);
+          const play = doc.createElement('button');
+          play.type = 'button';
+          play.className = 'queue-play';
+          play.textContent = '▶';
+          play.title = t('album.playTrack', { name: entry.name || '' });
+          play.setAttribute('aria-label', play.title);
+          li.querySelector('.queue-art-wrap').append(play);
+        }
         li.querySelector('.queue-name').textContent = entry.name || t('player.unknownTitle');
         li.querySelector('.queue-artist').textContent = entry.artist || '';
         li.querySelector('.queue-time').textContent = entry.duration ? formatTime(entry.duration / 1000) : '';
@@ -2607,6 +2638,7 @@
         barTop: () => player.barTop(),
         play: (item) => player.play(item),
         playQueue: (entries, pos, options) => player.playQueue(entries, pos, options),
+        appendQueue: (entry) => player.appendQueue(entry),
         toggle: () => player.toggle(),
         pause: () => player.pause(),
         onChange: scoped(this.listeners),
@@ -2652,6 +2684,8 @@
       if (restore && saved?.current) {
         // Restored queues keep their position. Resume only when the user presses play.
         this.start(saved.current, { force: true, resumeAt: saved.time, paused: true });
+      } else if (restore && this.queue?.entries.length) {
+        this.loadQueuedPaused(this.queue);
       } else {
         this.root.hidden = true;
         this.layout();
@@ -2664,6 +2698,10 @@
       this.switchSource(item.source, false);
       // 单独播放另一首歌时结束队列；同一首歌切换音质时保留
       if (this.queue && trackKey(item) !== trackKey(this.queue.entries[this.queue.pos])) this.clearQueue();
+      if (item.source === 'qq' && this.queue?.entries[this.queue.pos]) {
+        // Keep the selected quality when this entry repeats or its source context is restored.
+        this.queue.entries[this.queue.pos].quality = item.quality;
+      }
       return this.start(item);
     }
 
@@ -2693,6 +2731,43 @@
         this.queue.pos = 0;
       }
       return this.playAt(this.queue.pos);
+    }
+
+    /** Add to this source's queue without starting playback or changing sources. */
+    appendQueue(entry) {
+      entry = withIdentity(entry);
+      const source = sourceOf(entry);
+      this.sourceContexts ||= new Map();
+      const active = source === (this.source || 'apple');
+      const context = active ? { queue: this.queue, current: this.current } : (this.sourceContexts.get(source) || {});
+      if (!context.queue) {
+        const current = context.current;
+        context.queue = { entries: current ? [withIdentity({ ...current, track: current.track, name: current.title || current.name })] : [],
+          pos: current ? 0 : -1, ordered: null, more: null, extending: false };
+      }
+      context.queue.entries.push(entry);
+      if (context.queue.ordered) context.queue.ordered.push(entry);
+      if (active) {
+        this.queue = context.queue;
+        this.renderQueue(true);
+        this.renderModes();
+        this.prepareNext();
+        if (!this.current) this.loadQueuedPaused(this.queue);
+      } else {
+        this.sourceContexts.set(source, context);
+      }
+    }
+
+    /** Make a previously unplayed queue accessible, waiting for an explicit play action. */
+    loadQueuedPaused(queue) {
+      const token = this.playToken;
+      if (queue.pos < 0) queue.pos = 0;
+      resolveEntry(queue.entries[queue.pos]).then((item) => {
+        if (token !== this.playToken || this.queue !== queue || this.current) return;
+        return this.start(item, { paused: true });
+      }).catch((error) => {
+        if (token === this.playToken && this.queue === queue) this.showError(error.message || String(error));
+      });
     }
 
     /** 有 more 的队列（电台）：当前曲目之后不到 2 首时取下一批接在队尾；同时只取一次，取不到时下次换曲再试 */

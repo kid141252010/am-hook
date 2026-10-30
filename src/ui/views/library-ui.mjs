@@ -163,7 +163,7 @@ export function trackRow(track, { actions, onPlay, extraItems, playlistId, lead 
   if (!video && onPlay) {
     playBtn = el('button', { className: 'track-play', type: 'button', innerHTML: PLAY_ICON });
     playBtn.setAttribute('aria-label', t('album.playTrack', { name: track.name }));
-    playBtn.addEventListener('click', onPlay);
+    playBtn.addEventListener('click', (event) => { event.stopPropagation(); onPlay(); });
     cover.append(playBtn);
   }
   const title = track.href ? el('a', { className: 'track-title', href: track.href, textContent: track.name })
@@ -186,7 +186,12 @@ export function trackRow(track, { actions, onPlay, extraItems, playlistId, lead 
   const row = el('div', { className: `track pl-track lib-track${video ? ' video' : ''}${lead ? ' has-lead' : ''}` },
     lead || null, cover, main, albumCol,
     el('span', { className: 'track-time', textContent: track.duration ? formatTime(track.duration / 1000) : '' }), more);
-  if (!video && onPlay) row.addEventListener('dblclick', (e) => { if (!e.target.closest('a, button')) onPlay(); });
+  if (track.source === 'qq' && track.href) {
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('a, button')) return;
+      title.click();
+    });
+  } else if (!video && onPlay) row.addEventListener('dblclick', (e) => { if (!e.target.closest('a, button')) onPlay(); });
   return { row, playBtn, track };
 }
 

@@ -29,7 +29,7 @@ test('QQ DTO maps names, timing, badges and direct QQ artwork', () => {
   assert.equal(track.duration, 269000);
   assert.deepEqual(track.qq, { mid: dto.id, albumMid: dto.albumMid, vip: true, ttml: true });
   assert.deepEqual(track.artwork, { url: dto.cover });
-  assert.equal(track.href, '');
+  assert.equal(track.href, `/qq-song/${dto.id}`);
   assert.equal(track.albumHref, '');
   assert.equal(JSON.stringify(track).includes('example.invalid'), false);
   assert.equal(JSON.stringify(track).includes('file_url'), false);
@@ -52,9 +52,47 @@ test('QQ optional fields default safely; invalid IDs cannot form adapter paths',
     assert.throws(() => qq.toTrack({ id }));
     assert.throws(() => qq.playUrl(id));
     assert.throws(() => qq.downloadUrl(id));
+    assert.throws(() => qq.songPath(id));
   }
   assert.equal(qq.playUrl('1'), '/qq/song/1/play');
   assert.equal(qq.downloadUrl('1'), '/qq/song/1/download');
+});
+
+test('QQ quality rows list all tiers, retain formats and sizes, and omit unavailable actions', () => {
+  const rows = qq.qualityRows({ qualities: [
+    { quality: 'SQ', available: true, sizeBytes: 55397039, format: 'FLAC' },
+    { quality: 'HQ', available: true, sizeBytes: 10792943, format: 'MP3 320 kbps' },
+    { quality: 'WEB', available: false, sizeBytes: 0, format: 'MP3 128 kbps' },
+    { quality: 'NAC', available: true, sizeBytes: 0, format: 'AAC' },
+    { quality: 'unknown', available: true, sizeBytes: 42, format: 'ignored' },
+  ] }, dto.id);
+  assert.deepEqual(rows.map((row) => row.quality), ['HQ', 'SQ', 'WEB', 'NAC', 'RS']);
+  assert.deepEqual(rows.map((row) => row.available), [true, true, false, false, false]);
+  assert.equal(rows[0].format, 'MP3 320 kbps');
+  assert.equal(rows[0].sizeBytes, 10792943);
+  assert.equal(rows[1].downloadUrl, `/qq/song/${dto.id}/download?quality=SQ`);
+  assert.equal(rows[1].playUrl, `/qq/song/${dto.id}/play?quality=SQ`);
+  for (const row of rows.slice(2)) {
+    assert.equal(Object.hasOwn(row, 'playUrl'), false);
+    assert.equal(Object.hasOwn(row, 'downloadUrl'), false);
+  }
+  assert.equal(rows[4].sizeBytes, null);
+  assert.equal(qq.qualityRows(null, dto.id).length, 5);
+  for (const quality of ['', 'hq', '../SQ', 'HQ&x=1', null, 1]) {
+    assert.throws(() => qq.playUrl(dto.id, quality));
+    assert.throws(() => qq.downloadUrl(dto.id, quality));
+    assert.throws(() => qq.qualityEntry(qq.toTrack(dto), quality));
+  }
+});
+
+test('detail lyric lines use the best parsed source and retain translations as text', () => {
+  const result = qq.selectLyrics([candidate('ttml', 'bad'), candidate('lrc', 'valid')], (text) => {
+    if (text === 'bad') throw new Error('bad XML');
+    return { lines: [{ text: '晴天 <script>', translation: 'Sunny day' }, { text: '  ' }] };
+  });
+  assert.equal(result.source, 'lrc');
+  assert.deepEqual(qq.lyricLines(result), [{ text: '晴天 <script>', translation: 'Sunny day' }]);
+  assert.deepEqual(qq.lyricLines({ song: null }), []);
 });
 
 test('source namespaces isolate equal numeric IDs and upgrade old Apple snapshots', () => {
@@ -130,6 +168,7 @@ test('QQ clients only request local adapter paths and pass cancellation signals'
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     if (path.includes('/lyrics')) return { ok: true, json: async () => ({ candidates: [candidate('lrc')] }) };
+    if (path.includes('/qualities')) return { ok: true, json: async () => ({ qualities: [{ quality: 'HQ', available: true, sizeBytes: 10792943, format: 'MP3 320 kbps' }] }) };
     return { ok: true, json: async () => path.includes('/search') ? { songs: [dto], total: 99 } : dto };
   };
   try {
@@ -140,6 +179,8 @@ test('QQ clients only request local adapter paths and pass cancellation signals'
     assert.equal(calls[0].options.signal, controller.signal);
     assert.equal((await qq.song(dto.id)).key, `qq:${dto.id}`);
     assert.equal((await qq.lyrics(dto.id, parse)).source, 'lrc');
+    assert.equal((await qq.qualities(dto.id, controller.signal))[0].available, true);
+    assert.equal(calls.at(-1).options.signal, controller.signal);
     assert.ok(calls.every(({ path }) => path.startsWith('/qq/')));
     globalThis.fetch = async () => ({ ok: false, status: 503, json() { throw new Error('must not read upstream body'); } });
     await assert.rejects(qq.searchSongs('x'), /QQ HTTP 503/);
@@ -155,7 +196,7 @@ function playerHarness() {
     audio: { paused: true, currentTime: 0, duration: 269, async play() { this.paused = false; }, pause() { this.paused = true; }, load() {}, addEventListener() {} },
   });
   player.clock = player.audio;
-  for (const name of ['closeQualityPanel', 'layout', 'emit', 'renderQueue', 'setLoading', 'renderToggle', 'renderTrackText', 'renderArtwork', 'renderMode', 'updateMediaSession', 'renderProgress', 'prepareNext', 'extendQueue', 'show']) player[name] = () => {};
+  for (const name of ['closeQualityPanel', 'layout', 'emit', 'renderQueue', 'renderModes', 'setLoading', 'renderToggle', 'renderTrackText', 'renderArtwork', 'renderMode', 'updateMediaSession', 'renderProgress', 'prepareNext', 'extendQueue', 'show']) player[name] = () => {};
   player.showError = (error) => { player.error = error; };
   player.teardown = () => { player.audio.pause(); };
   return player;
@@ -168,6 +209,80 @@ test('QQ plays the local 302 route through native audio without asking Apple for
   assert.equal(player.current.key, `qq:${dto.id}`);
   assert.equal(player.audio.src, `/qq/song/${dto.id}/play`);
   assert.equal(player.audio.paused, false);
+});
+
+test('every QQ quality reaches the native play URL and matching playback label', async () => {
+  const track = qq.toTrack(dto);
+  for (const quality of qq.QUALITY_IDS) {
+    const player = playerHarness();
+    await player.playQueue([qq.qualityEntry(track, quality)]);
+    assert.equal(player.current.quality, quality);
+    assert.equal(player.current.id, `qq:${dto.id}:${quality}`);
+    assert.equal(player.audio.src, qq.playUrl(dto.id, quality));
+    assert.equal(player.modeText(), `QQ · ${quality}`);
+    assert.equal(player.current.href, qq.songPath(dto.id));
+    assert.equal(player.queue.entries[0].quality, quality);
+  }
+});
+
+test('changing QQ quality on its detail page preserves the remaining queue and repeats that quality', async () => {
+  const player = playerHarness();
+  const track = qq.toTrack(dto);
+  const next = qq.entryOf(qq.toTrack({ id: 'next', name: 'Next' }));
+  await player.playQueue([qq.entryOf(track), next]);
+  const queue = player.queue;
+  await player.play(qq.qualityItem(track, 'SQ'));
+  assert.equal(player.audio.src, qq.playUrl(dto.id, 'SQ'));
+  assert.equal(player.queue, queue);
+  assert.equal(queue.entries[1].track, 'next');
+  assert.equal(queue.entries[0].quality, 'SQ');
+  await player.playAt(0);
+  assert.equal(player.current.quality, 'SQ');
+  assert.equal(player.audio.src, qq.playUrl(dto.id, 'SQ'));
+});
+
+test('a first queued QQ song is loaded paused and a saved pending queue is accessible on switching source', async () => {
+  const player = playerHarness();
+  player.source = 'qq';
+  player.appendQueue(qq.entryOf(qq.toTrack(dto)));
+  await new Promise(setImmediate);
+  assert.equal(player.current.track, dto.id);
+  assert.equal(player.audio.paused, true);
+  assert.equal(player.queue.pos, 0);
+  assert.equal(player.queue.entries.length, 1);
+
+  const other = playerHarness();
+  other.appendQueue(qq.qualityEntry(qq.toTrack(dto), 'NAC'));
+  assert.equal(other.current, null);
+  other.switchSource('qq');
+  await new Promise(setImmediate);
+  assert.equal(other.current.quality, 'NAC');
+  assert.equal(other.audio.paused, true);
+  assert.equal(other.audio.src, qq.playUrl(dto.id, 'NAC'));
+});
+
+test('adding QQ to its saved queue preserves Apple playback and source restoration retains quality', async () => {
+  const player = playerHarness();
+  const appleQueue = { entries: [{ track: '123' }], pos: 0 };
+  player.current = { track: '123', id: '123:stereo', source: 'apple' };
+  player.queue = appleQueue;
+  player.audio.paused = false;
+  const entry = qq.qualityEntry(qq.toTrack(dto), 'SQ');
+  player.appendQueue(entry);
+  assert.equal(player.source, 'apple');
+  assert.equal(player.queue, appleQueue);
+  assert.equal(player.current.track, '123');
+  assert.equal(player.audio.paused, false);
+  assert.equal(player.sourceContexts.get('qq').queue.entries[0].quality, 'SQ');
+  await player.playQueue([entry]);
+  player.audio.currentTime = 23;
+  player.switchSource('apple');
+  player.switchSource('qq');
+  await new Promise(setImmediate);
+  assert.equal(player.current.quality, 'SQ');
+  assert.equal(player.current.label, 'QQ · SQ');
+  assert.equal(player.audio.src, qq.playUrl(dto.id, 'SQ'));
+  assert.equal(player.audio.paused, true);
 });
 test('source switching saves each queue, position and progress; mixed input is filtered', async () => {
   const player = playerHarness();

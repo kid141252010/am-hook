@@ -37,6 +37,7 @@ pub async fn fallback_handler(uri: Uri, headers: HeaderMap) -> Response<Body> {
         || is_library_path(path)
         || is_radio_path(path)
         || is_settings_path(path)
+        || path.strip_prefix("qq-song/").is_some_and(|mid| crate::qq::valid_mid(mid.trim_end_matches('/')) && !mid.contains("//"))
     {
         return app_handler(headers).await;
     }
@@ -402,13 +403,13 @@ mod tests {
     #[tokio::test]
     async fn not_found_is_not_cached() {
         // 旧版本的内容哈希地址与其他未知路径：404 不能被浏览器或 CDN 缓存
-        for path in ["/assets/h/app.0000000000000000.mjs", "/assets/h/x.0000000000000000.js", "/nope"] {
+        for path in ["/assets/h/app.0000000000000000.mjs", "/assets/h/x.0000000000000000.js", "/nope", "/qq-song/../bad", "/qq-song/123//"] {
             let response = fallback_handler(path.parse().unwrap(), HeaderMap::new()).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
             assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-store", "{path}");
         }
         // 页面地址仍返回外壳
-        for path in ["/library/songs", "/radio", "/https://music.apple.com/us/station/apple-music-1/ra.978194965"] {
+        for path in ["/library/songs", "/radio", "/https://music.apple.com/us/station/apple-music-1/ra.978194965", "/qq-song/0039MnYb0qxYhV", "/qq-song/123/"] {
             let page = fallback_handler(path.parse().unwrap(), HeaderMap::new()).await;
             assert_eq!(page.status(), StatusCode::OK, "{path}");
         }

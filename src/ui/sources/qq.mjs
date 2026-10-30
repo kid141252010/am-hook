@@ -5,8 +5,15 @@ export { trackKey } from './track.mjs';
 const MID = /^[0-9A-Za-z]{1,32}$/;
 export const enabled = () => globalThis.window?.AM_HOOK_HOST?.qqEnabled === true;
 const mid = (id) => { if (!['string', 'number'].includes(typeof id) || !MID.test(String(id))) throw new Error('Invalid QQ ID'); return String(id); };
-export const playUrl = (id) => `/qq/song/${mid(id)}/play`;
-export const downloadUrl = (id) => `/qq/song/${mid(id)}/download`;
+export const QUALITY_IDS = ['HQ', 'SQ', 'WEB', 'NAC', 'RS'];
+export function qualityId(value = 'HQ') {
+  if (!QUALITY_IDS.includes(value)) throw new Error('Invalid QQ quality');
+  return value;
+}
+const qualityQuery = (quality) => quality === undefined ? '' : `?quality=${qualityId(quality)}`;
+export const songPath = (id) => `/qq-song/${mid(id)}`;
+export const playUrl = (id, quality) => `/qq/song/${mid(id)}/play${qualityQuery(quality)}`;
+export const downloadUrl = (id, quality) => `/qq/song/${mid(id)}/download${qualityQuery(quality)}`;
 export function toTrack(dto) {
   const id = mid(dto.id);
   const albumMid = MID.test(dto.albumMid || '') ? dto.albumMid : id;
@@ -14,7 +21,7 @@ export function toTrack(dto) {
   return withIdentity({
     source: 'qq', kind: 'song', id, name: String(dto.name || ''), title: String(dto.name || ''),
     artists, artist: artists.map((a) => a.name).join(' / '), album: String(dto.album || ''),
-    albumId: albumMid, albumHref: '', href: '', country: '',
+    albumId: albumMid, albumHref: '', href: songPath(id), country: '',
     duration: Number.isFinite(dto.durationMs) ? Math.max(0, dto.durationMs) : 0,
     artwork: { url: typeof dto.cover === 'string' ? dto.cover : '' }, explicit: false,
     qq: { mid: id, albumMid, vip: dto.vip === true, ttml: dto.ttml === true },
@@ -22,6 +29,13 @@ export function toTrack(dto) {
 }
 export function entryOf(track) {
   return withIdentity({ ...track, track: track.id, artwork: artUrl(track.artwork, 600) });
+}
+export function qualityEntry(track, quality) {
+  return { ...entryOf(track), quality: qualityId(quality) };
+}
+export function qualityItem(track, quality) {
+  return { ...qualityEntry(track, quality), id: `qq:${track.id}:${quality}`, title: track.name,
+    streamUrl: playUrl(track.id, quality), label: `QQ · ${quality}`, variants: [] };
 }
 async function request(path, signal) {
   const response = await fetch(path, { signal });
@@ -33,6 +47,24 @@ export async function searchSongs(q, { limit = 30, offset = 0, signal } = {}) {
   return { songs: (data.songs || []).map(toTrack), total: data.total || 0 };
 }
 export async function song(id, signal) { return toTrack(await request(`/qq/song/${mid(id)}`, signal)); }
+export function qualityRows(data, id) {
+  const rows = Array.isArray(data?.qualities) ? data.qualities : [];
+  return QUALITY_IDS.map((quality) => {
+    const row = rows.find((item) => item?.quality === quality);
+    const sizeBytes = Number.isSafeInteger(row?.sizeBytes) && row.sizeBytes >= 0 ? row.sizeBytes : null;
+    const available = row?.available === true && sizeBytes > 0;
+    return { quality, available, sizeBytes, format: typeof row?.format === 'string' ? row.format : '',
+      ...(available ? { playUrl: playUrl(id, quality), downloadUrl: downloadUrl(id, quality) } : {}) };
+  });
+}
+export async function qualities(id, signal) {
+  return qualityRows(await request(`/qq/song/${mid(id)}/qualities`, signal), id);
+}
+/** The detail page and full-screen lyrics share the parsed lyric model. */
+export function lyricLines(result) {
+  return (result?.song?.lines || []).filter((line) => typeof line.text === 'string' && line.text.trim())
+    .map((line) => ({ text: line.text, translation: line.translation || '' }));
+}
 export const LYRIC_PRIORITY = ['amll', 'ttml', 'qrc', 'lrc'];
 // Try the next source if a candidate is empty, malformed or has no timed lines.
 export function selectLyrics(candidates, parse) {
@@ -51,9 +83,9 @@ export async function lyrics(id, parse, signal) {
   const data = await request(`/qq/song/${mid(id)}/lyrics`, signal);
   return selectLyrics(data.candidates, parse);
 }
-export function download(track) {
+export function download(track, quality) {
   const link = document.createElement('a');
-  link.href = downloadUrl(track.id ?? track.track);
+  link.href = downloadUrl(track.track ?? track.id, quality);
   link.download = '';
   document.body.append(link); link.click(); link.remove();
 }
