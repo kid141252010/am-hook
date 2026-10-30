@@ -133,7 +133,7 @@ import('/assets/lyrics/panel.mjs')
     const more = actions.moreButton(() => target, 'lyrics-action lyrics-more');
     $('lyrics-overlay').querySelector('.lyrics-actions').append(favorite.button, more);
     function syncTarget() {
-      const id = (player.current && player.current.track) || null;
+      const id = player.current ? window.AmHook.trackKey(player.current) : null;
       if (id === targetId) return;
       targetId = id;
       target = nowPlayingTarget(player.current);
@@ -143,9 +143,9 @@ import('/assets/lyrics/panel.mjs')
     function resolveTarget() {
       syncTarget();
       const id = targetId;
-      if (!id || resolved === id) return;
+      if (!id || resolved === id || player.current?.source === 'qq') return;
       resolved = id;
-      songTarget(id, player.current.country || 'us')
+      songTarget(player.current.track, player.current.country || 'us')
         .then((full) => { if (id === targetId) { target = full; favorite.refresh(); } })
         .catch(() => { if (id === targetId) resolved = null; }); // 取不到时沿用播放队列里的信息，下次展开再试
     }
@@ -157,7 +157,7 @@ import('/assets/lyrics/panel.mjs')
 
     const follow = (current) => {
       syncTarget();
-      lyrics.setTrack(current && current.track, current && current.country);
+      lyrics.setTrack(current && current.track, current && current.country, current?.source);
     };
     follow(player.current);
     player.onChange(follow);

@@ -329,12 +329,22 @@
     };
   }
 
+  const sourceOf = (item) => item && item.source === 'qq' ? 'qq' : 'apple';
+  const trackKey = (item) => `${sourceOf(item)}:${String(item?.track ?? item?.id ?? '')}`;
+  const withIdentity = (item) => ({ ...item, source: sourceOf(item), key: trackKey(item) });
+
   async function resolveEntry(entry) {
+    if (entry.source === 'qq') {
+      if (!/^[0-9A-Za-z]{1,32}$/.test(entry.track)) throw new Error('Invalid QQ ID');
+      return { ...entry, source: 'qq', key: trackKey(entry), id: `qq:${entry.track}:HQ`,
+        title: entry.name, streamUrl: `/qq/song/${entry.track}/play`, label: 'QQ · HQ', variants: [] };
+    }
     const { variants } = await global.AmWrapper.songMaster(entry.track);
     const best = sortVariants(variants).find((v) => detectMode(v.codecs));
     if (!best) throw Object.assign(new Error(t('album.noPlayable', { name: entry.name })), { noPlayable: true });
     return {
       ...variantItem(entry.track, best),
+      source: 'apple', key: trackKey(entry),
       // 这首歌的全部音质，全屏播放界面的音质详情里可切换
       variants,
       track: entry.track,
@@ -1744,8 +1754,10 @@
       this.playToken = 0;
       /** 播放队列：{ entries, pos }，entries 见 resolveEntry；pendingTrack 为正在解析的曲目 */
       this.queue = null;
+      this.source = 'apple';
+      this.sourceContexts = new Map();
       this.queueSerial = 0;
-      this.pendingTrack = null;
+      this.pendingTrack = this.pendingKey = null;
       /** 随机播放（true / false）与重复播放（off / all / one），与 Apple Music 相同，下次打开时保留 */
       this.shuffle = false;
       this.repeat = 'off';
@@ -1810,6 +1822,8 @@
       if (!this.current) return;
       const c = this.current;
       const badge = this.$('.player-mode');
+      badge.disabled = c.source === 'qq';
+      if (c.source === 'qq') { badge.textContent = c.label; badge.hidden = false; badge.title = c.label; badge.setAttribute('aria-label', c.label); this.closeQualityPanel(); return; }
       const doc = this.root.ownerDocument;
       const icon = qualityIcon(c.badge, doc);
       if (icon) icon.removeAttribute('title');
@@ -1826,6 +1840,7 @@
     /** 播放方式：MSE · ALAC（浏览器直接解码）、ALAC → FLAC（转码）、E-AC-3 → 5.1 PCM（解码为多声道 PCM）、E-AC-3 → JOC（对象渲染） */
     modeText() {
       const c = this.current;
+      if (c.source === 'qq') return 'QQ · HQ';
       if (c.mode === 'joc2') return `E-AC-3 → ${t('player.jocSpeaker')}`;
       if (c.mode === 'jocbin') return `E-AC-3 → ${t('player.jocBinaural', { dataset: this.pcm ? this.pcm.dataset : jocSettings().dataset })}`;
       if (c.mode === 'flac') return 'ALAC → FLAC';
@@ -1893,17 +1908,18 @@
      * 否则（如歌曲页播放）向 wrapper-lite 取一次 master，按歌曲缓存，取回后重绘详情
      */
     variantsOf(item) {
+      if (item.source === 'qq') return { variants: [] };
       if (item.variants) return { variants: item.variants };
-      const cached = this.variantCache.get(item.track);
+      const cached = this.variantCache.get(trackKey(item));
       if (cached) return cached;
       const state = { loading: true };
-      this.variantCache.set(item.track, state);
+      this.variantCache.set(trackKey(item), state);
       if (this.variantCache.size > 20) this.variantCache.delete(this.variantCache.keys().next().value);
       global.AmWrapper.songMaster(item.track)
         .then(({ variants }) => { state.variants = variants; }, (err) => { state.error = err.message || String(err); })
         .finally(() => {
           state.loading = false;
-          if (this.current && this.current.track === item.track) this.renderQualityPanel();
+          if (this.current && trackKey(this.current) === trackKey(item)) this.renderQualityPanel();
         });
       return state;
     }
@@ -2011,8 +2027,8 @@
 
     openQualityPanel() {
       if (!this.current) return;
-      const state = this.variantCache.get(this.current.track);
-      if (state && state.error) this.variantCache.delete(this.current.track); // 上次没取到：重新取
+      const state = this.variantCache.get(trackKey(this.current));
+      if (state && state.error) this.variantCache.delete(trackKey(this.current)); // 上次没取到：重新取
       this.qualityPanel.hidden = false;
       this.$('.player-mode').setAttribute('aria-expanded', 'true');
       this.renderQualityPanel();
@@ -2428,7 +2444,7 @@
       if (!this.queuePanel || this.queuePanel.hidden || (this.queueDrag && !force)) return;
       const q = this.queue;
       const upcoming = q ? q.entries.slice(q.pos + 1) : [];
-      const key = q ? `${q.pos}|${q.entries.map((e) => e.track).join(',')}` : '';
+      const key = q ? `${q.pos}|${q.entries.map(trackKey).join(',')}` : '';
       if (!force && key === this.queueKey) return;
       this.queueKey = key;
       this.queuePanel.querySelector('.queue-empty').hidden = upcoming.length > 0;
@@ -2583,6 +2599,9 @@
       return {
         get current() { return player.current; },
         get pendingTrack() { return player.pendingTrack; },
+        get pendingKey() { return player.pendingKey; },
+        get source() { return player.source || 'apple'; },
+        switchSource: (source) => player.switchSource(source),
         get audio() { return player.audio; },
         transport: () => player.transport(),
         barTop: () => player.barTop(),
@@ -2607,9 +2626,44 @@
      * （音质详情里切换用，省略时打开详情再取）；以上均可省略
      * m3u8Url 为 CDN 原始地址（浏览器解密）
      */
+    switchSource(source, restore = true) {
+      source = source === 'qq' ? 'qq' : 'apple';
+      const previous = this.source || 'apple';
+      if (source === previous) return;
+      this.sourceContexts ||= new Map();
+      this.sourceContexts.set(previous, { queue: this.queue, current: this.current, time: this.transport().currentTime });
+      this.playToken++;
+      this.queueSerial++;
+      this.nextSerial++;
+      clearTimeout(this.nextRetry);
+      this.nextEntry = null;
+      this.pendingTrack = this.pendingKey = null;
+      this.teardown();
+      this.source = source;
+      try { localStorage.setItem('am-hook:source', source); } catch {}
+      const saved = this.sourceContexts.get(source);
+      this.queue = saved?.queue || null;
+      this.current = null;
+      this.updateMediaSession();
+      this.closeQualityPanel();
+      this.setLoading(false);
+      this.showError('');
+      this.renderQueue(true);
+      if (restore && saved?.current) {
+        // Restored queues keep their position. Resume only when the user presses play.
+        this.start(saved.current, { force: true, resumeAt: saved.time, paused: true });
+      } else {
+        this.root.hidden = true;
+        this.layout();
+        this.emit();
+      }
+    }
+
     async play(item) {
+      item = withIdentity(item);
+      this.switchSource(item.source, false);
       // 单独播放另一首歌时结束队列；同一首歌切换音质时保留
-      if (this.queue && item.track !== this.queue.entries[this.queue.pos].track) this.clearQueue();
+      if (this.queue && trackKey(item) !== trackKey(this.queue.entries[this.queue.pos])) this.clearQueue();
       return this.start(item);
     }
 
@@ -2620,6 +2674,13 @@
      * options.more：电台这类没有尽头的队列，async () => 下一批条目，剩下不到 2 首时取来接在队尾（见 extendQueue）。
      */
     playQueue(entries, pos = 0, options = {}) {
+      if (!entries.length || !entries[pos]) return;
+      const source = sourceOf(entries[pos]);
+      const selected = entries[pos];
+      const onlySource = entries.filter((entry) => sourceOf(entry) === source);
+      pos = onlySource.indexOf(selected);
+      entries = onlySource.map(withIdentity);
+      this.switchSource(source, false);
       if (typeof options.shuffle === 'boolean' && options.shuffle !== this.shuffle) {
         this.shuffle = options.shuffle;
         try { localStorage.setItem('am-hook:shuffle', this.shuffle ? '1' : '0'); } catch {}
@@ -2643,6 +2704,7 @@
         .then(() => q.more())
         .then((entries) => {
           if (this.queue !== q || !entries || !entries.length) return;
+          entries = entries.filter((entry) => sourceOf(entry) === (this.source || 'apple')).map(withIdentity);
           q.entries.push(...entries);
           if (q.ordered) q.ordered.push(...entries);
           this.renderQueue(true);
@@ -2656,7 +2718,7 @@
     clearQueue() {
       this.queue = null;
       this.queueSerial++;
-      this.pendingTrack = null;
+      this.pendingTrack = this.pendingKey = null;
       this.prepareNext();
     }
 
@@ -2714,7 +2776,7 @@
       if (pos >= 0) q.pos = pos;
       this.nextEntry = null;
       this.queueSerial++;
-      this.pendingTrack = null;
+      this.pendingTrack = this.pendingKey = null;
       this.current = { ...item, duration: this.mse.playlist.duration };
       this.showError('');
       this.renderTrackText();
@@ -2734,34 +2796,36 @@
       this.extendQueue();
       const serial = ++this.queueSerial;
       this.pendingTrack = entry.track;
+      this.pendingKey = trackKey(entry);
       this.emit();
       try {
         const item = await resolveEntry(entry);
         if (serial !== this.queueSerial) return;
-        this.pendingTrack = null;
+        this.pendingTrack = this.pendingKey = null;
         await this.start(item);
       } catch (err) {
         if (serial !== this.queueSerial) return;
-        this.pendingTrack = null;
+        this.pendingTrack = this.pendingKey = null;
         this.showError(() => (err.noPlayable ? err.message : t('album.trackFailed', { name: entry.name, msg: err.message })));
       }
       this.emit();
     }
 
     /** options.force：同一首同一音质也重新开始（JOC 设置变化后换播放方式，见 replay） */
-    async start(item, { force = false } = {}) {
-      if (!force && this.current && this.current.id === item.id) { this.toggle(); return; }
+    async start(item, { force = false, resumeAt: savedTime, paused = false } = {}) {
+      item = withIdentity(item);
+      if (!force && this.current && trackKey(this.current) === trackKey(item) && this.current.id === item.id) { this.toggle(); return; }
       this.jocMode = jocSettings().mode;
       this.jocStale = false;
       this.jocFallback = false;
-      const modes = detectModes(item.codecs);
+      const modes = item.source === 'qq' ? ['native'] : detectModes(item.codecs);
       if (!modes.length) {
         this.showError(() => t('player.errorCodec', { codecs: item.codecs, hint: fallbackHint() }));
         return;
       }
       const token = ++this.playToken;
       // 同一首歌切换音质时从当前位置继续；专辑页换曲（track 不同）从头播放
-      const resumeAt = this.current && this.current.track === item.track ? this.transport().currentTime : 0;
+      const resumeAt = savedTime ?? (this.current && trackKey(this.current) === trackKey(item) ? this.transport().currentTime : 0);
       this.current = { ...item, mode: modes[0], duration: 0 };
       this.show();
       this.showError('');
@@ -2780,8 +2844,10 @@
         this.renderMode();
         this.attempting = true;
         try {
-          await this.tryMode(mode, item, resumeAt, token);
+          await this.tryMode(mode, item, resumeAt, token, paused);
           this.attempting = false;
+          this.setLoading(false);
+          if (paused && token === this.playToken) this.audio.pause();
           this.renderProgress();
           if (token === this.playToken) {
             this.nextEntry = null; // 新的 MediaSource 上还没有接任何曲目
@@ -2804,7 +2870,7 @@
       }
 
       this.teardown();
-      failedCodecs.add(item.codecs);
+      if (item.source !== 'qq') failedCodecs.add(item.codecs);
       this.unsupportedListeners.forEach((fn) => fn(item.codecs));
       const detail = lastError && lastError.message ? ` (${lastError.message})` : '';
       this.showError(() => t('player.errorFailed', { label: item.label || item.codecs, codecs: item.codecs, hint: fallbackHint() }) + detail);
@@ -2819,8 +2885,23 @@
       this.audio.load();
     }
 
-    async tryMode(mode, item, resumeAt, token) {
+    async tryMode(mode, item, resumeAt, token, paused = false) {
       this.teardown();
+      if (mode === 'native') {
+        this.audio.src = item.streamUrl;
+        if (paused) {
+          this.audio.addEventListener('loadedmetadata', () => {
+            if (token === this.playToken && resumeAt > 0) this.audio.currentTime = resumeAt;
+          }, { once: true });
+          this.audio.load();
+          return;
+        }
+        await this.audio.play();
+        if (token !== this.playToken) return;
+        if (resumeAt > 0) this.audio.currentTime = resumeAt;
+        this.current.duration = Number.isFinite(this.audio.duration) ? this.audio.duration : 0;
+        return;
+      }
       if (isPcmMode(mode)) {
         const onError = (err) => this.showError(err.message || String(err));
         if (mode === 'ec3') this.pcm = new PcmEngine(() => this.updatePcm(), onError, () => this.ended());
@@ -2843,7 +2924,7 @@
         if (token !== this.playToken) return;
         this.current.duration = this.pcm.duration;
         if (resumeAt > 0) await this.pcm.seek(resumeAt);
-        await this.pcm.play();
+        if (!paused) await this.pcm.play();
         return;
       }
       this.mse.onRecover = () => this.showError('');
@@ -2852,7 +2933,7 @@
       if (token !== this.playToken) return;
       this.current.duration = this.mse.playlist ? this.mse.playlist.duration : 0;
       if (resumeAt > 0) this.audio.currentTime = resumeAt;
-      await this.audio.play();
+      if (!paused) await this.audio.play();
     }
 
     /** 某编码经实际尝试确认无法播放时回调 */
@@ -2888,7 +2969,7 @@
 
     renderToggle() {
       const a = this.transport();
-      const waiting = this.loading && a.paused || (!a.paused && !isPcmMode(this.current.mode) && a.readyState < 3);
+      const waiting = this.loading && a.paused || (!a.paused && !isPcmMode(this.current?.mode) && a.readyState < 3);
       if (!a.paused) this.loading = false;
       const btn = this.$('.player-toggle');
       btn.innerHTML = waiting ? ICON_LOADING : (a.paused ? ICON_PLAY : ICON_PAUSE);
@@ -2929,7 +3010,7 @@
 
     updateMediaSession() {
       if (!('mediaSession' in navigator) || !global.MediaMetadata) return;
-      const source = this.current.artwork || '';
+      const source = this.current?.artwork || '';
       if (source !== this.mediaArtSource) {
         if (this.mediaArtController) this.mediaArtController.abort();
         if (this.mediaArtUrl) URL.revokeObjectURL(this.mediaArtUrl);
@@ -2953,11 +3034,18 @@
             .catch(() => {}); // The player bar still displays the original image.
         }
       }
+      if (!this.current) {
+        this.mediaMetadataState = null;
+        navigator.mediaSession.metadata = null;
+        navigator.mediaSession.playbackState = 'none';
+        return;
+      }
       this.writeMediaMetadata();
     }
 
     writeMediaMetadata() {
       const c = this.current;
+      if (!c) return;
       const state = {
         title: c.title || '',
         artist: c.artist || '',
@@ -3020,7 +3108,7 @@
     }
   }
 
-  const api = { AmPlayer, Marquee, artistNodes, qualityBadge, qualityIcon, segmentAt, formatTime, detectMode, detectModes, mimeFor, useJocSettings };
+  const api = { AmPlayer, Marquee, artistNodes, qualityBadge, qualityIcon, segmentAt, formatTime, detectMode, detectModes, mimeFor, useJocSettings, trackKey, sourceOf };
   if (typeof module !== 'undefined' && module.exports) module.exports = { ...api, MseEngine, JocEngine, JocLiveEngine, sortVariants };
   else global.AmHook = api;
 })(typeof window !== 'undefined' ? window : globalThis);

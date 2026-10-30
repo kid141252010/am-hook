@@ -1,6 +1,8 @@
 // 资料库的界面部件（导航与各页面共用）：对话框、歌单封面拼图、「添加到歌单」菜单、新建 / 编辑 / 删除歌单、导入与导出。
 // 数据的读写见 /assets/library.mjs。
 import * as library from '/assets/library.mjs';
+import * as qq from '../sources/qq.mjs';
+import { trackKey } from '../sources/track.mjs';
 
 const { AmI18n } = window;
 const { t } = AmI18n;
@@ -168,8 +170,11 @@ export function trackRow(track, { actions, onPlay, extraItems, playlistId, lead 
     : el('span', { className: 'track-title', textContent: track.name });
   const main = el('div', { className: 'track-main' },
     el('div', { className: 'track-line' }, title,
+      ...(track.source === 'qq' ? [el('span', { className: 'qq-badge', textContent: t('source.qq') }),
+        ...(track.qq?.vip ? [el('span', { className: 'qq-badge qq-vip', textContent: t('qq.vip') })] : []),
+        ...(track.qq?.ttml ? [el('span', { className: 'qq-badge', textContent: t('qq.ttml') })] : [])] : []),
       track.explicit ? el('span', { className: 'explicit', textContent: 'E', title: t('search.explicit') }) : null,
-      library.isFavorite(track.kind, track.id) ? el('span', { className: 'lib-fav', innerHTML: LIB_ICON.starFilled, title: t('library.favorited') }) : null,
+      (track.source === 'qq' ? qq.isFavorite(track) : library.isFavorite(track.kind, track.id)) ? el('span', { className: 'lib-fav', innerHTML: LIB_ICON.starFilled, title: t('library.favorited') }) : null,
       video ? el('span', { className: 'track-kind', innerHTML: VIDEO_ICON, title: t('album.video') }) : null),
     el('div', { className: 'track-artist' }, ...artistParts(track)));
   const albumCol = track.albumHref && track.album ? el('a', { className: 'track-album', href: track.albumHref, textContent: track.album })
@@ -190,10 +195,10 @@ export function syncTrackRows(rows, player) {
   const current = player.current;
   const playing = !!current && !player.transport().paused;
   for (const { row, playBtn, track } of rows) {
-    const active = !!current && track.kind === 'song' && current.track === track.id;
+    const active = !!current && track.kind === 'song' && trackKey(current) === trackKey(track);
     row.classList.toggle('playing', active);
     row.classList.toggle('paused', active && !playing);
-    row.classList.toggle('loading', track.kind === 'song' && player.pendingTrack === track.id);
+    row.classList.toggle('loading', track.kind === 'song' && player.pendingKey === trackKey(track));
     if (playBtn) playBtn.innerHTML = active && playing ? PAUSE_ICON : PLAY_ICON;
   }
 }

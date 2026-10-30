@@ -2331,3 +2331,16 @@ html[dir="rtl"] .quality-option .q-icon { -webkit-mask-position: right center; m
   .nav-folder-toggle { flex-basis: 24px; width: 24px; height: 44px; margin-left: -6px; }
   .nav-folder-toggle svg { width: 14px; height: 14px; }
 }
+
+/* Optional QQ source controls and shared track-row badges. */
+.source-switch { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; font-size: 14px; }
+.source-switch[hidden] { display: none; }
+.source-switch label { display: flex; gap: 10px; align-items: center; }
+.source-switch select { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+.source-switch a { color: var(--accent); }
+.qq-badge { display: inline-block; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.qq-vip { color: #b88724; }
+.qq-tracks { margin-top: 12px; }
+
+.home-page :is(.examples, .formats, .storefront)[hidden] { display: none; }
+.qq-badge { margin-inline-start: 6px; flex-shrink: 0; }

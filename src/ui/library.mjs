@@ -709,6 +709,7 @@ export function artUrl(template, w, h = w) {
 /** 曲目快照 → 播放队列条目（见 AmPlayer.playQueue） */
 export function entryOf(track) {
   return {
+    source: 'apple', key: `apple:${track.id}`,
     track: track.id,
     country: track.country,
     name: track.name,

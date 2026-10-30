@@ -24,6 +24,18 @@
 
   const dict = {
     zh: {
+      "source.label": "音源",
+      "source.apple": "Apple Music",
+      "source.qq": "QQ 音乐",
+      "qq.placeholder": "搜索 QQ 音乐歌曲、歌手",
+      "qq.favorites": "QQ 本地收藏",
+      "qq.download": "下载歌曲",
+      "qq.vip": "VIP",
+      "qq.ttml": "TTML",
+      "qq.storageFailed": "无法保存收藏，请检查浏览器存储空间。",
+      "qq.lyricsPriority": "歌词优先级：AMLL → TTML → QRC → LRC",
+      "qq.lyricsSource": "歌词来源：{source}",
+
       "mv.preview": "视频预览",
       "mv.quality": "画质与音轨",
       "mv.custom": "自由组合",
@@ -994,6 +1006,18 @@
       "ac.summaryBetter": "{n} 首 wrapper 更高",
     },
     en: {
+      "source.label": "Source",
+      "source.apple": "Apple Music",
+      "source.qq": "QQ Music",
+      "qq.placeholder": "Search QQ Music songs and artists",
+      "qq.favorites": "QQ local favorites",
+      "qq.download": "Download song",
+      "qq.vip": "VIP",
+      "qq.ttml": "TTML",
+      "qq.storageFailed": "Could not save favorites. Check browser storage.",
+      "qq.lyricsPriority": "Lyrics priority: AMLL → TTML → QRC → LRC",
+      "qq.lyricsSource": "Lyrics source: {source}",
+
       "mv.preview": "Video preview",
       "mv.quality": "Video & audio quality",
       "mv.custom": "Mix & match",

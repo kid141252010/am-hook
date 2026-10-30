@@ -21,6 +21,7 @@
  * 待播清单打开时占据歌词的位置。
  */
 import { parseTTML, duetSides } from './ttml.mjs';
+import { lyrics as qqLyrics } from '../sources/qq.mjs';
 import { DomLyricPlayer, BackgroundRender, MeshGradientRenderer } from './amll-core.mjs';
 import { ArtworkBackdrop } from './backdrop.mjs';
 
@@ -692,6 +693,7 @@ export function mountLyrics({ root, toggle, bar, player, getMeta, t, notify, onL
 
   /** 选定的来源没有这首歌的歌词、改用另一来源时的说明 */
   function sourceNote() {
+    if (trackSource === 'qq') return lyricsSource ? t('qq.lyricsSource', { source: lyricsSource.toUpperCase() }) : t('qq.lyricsPriority');
     if (!lyricsSource || lyricsSource === prefs.source) return '';
     if (prefs.source === 'apple') return t('lyrics.appleMissing');
     return t(amllStatus === 'failed' ? 'lyrics.amllFailed' : 'lyrics.amllMissing');
@@ -945,7 +947,7 @@ export function mountLyrics({ root, toggle, bar, player, getMeta, t, notify, onL
         ['weightLighter', weight > 0], ['weightBolder', weight < FONT_WEIGHTS.length - 1])),
       separator(),
       menuItem(menuNode('span', '', t('lyrics.source')), 'presentation', 'lyrics-menu-heading'),
-      ...['apple', 'amll'].map((source) => menuItem(menuButton({
+      ...(trackSource === 'qq' ? [] : ['apple', 'amll']).map((source) => menuItem(menuButton({
         label: t(source === 'apple' ? 'lyrics.sourceApple' : 'lyrics.sourceAmll'),
         icon: prefs.source === source ? 'check' : '', action: 'source', value: source, checked: prefs.source === source,
       }))),
@@ -1029,6 +1031,7 @@ export function mountLyrics({ root, toggle, bar, player, getMeta, t, notify, onL
    * 选了 AMLL 歌词库时先查它，未收录、请求失败或解析不了时记下原因，改用 Apple Music 歌词。
    */
   async function loadLyrics(id) {
+    if (trackSource === 'qq') return qqLyrics(id, parseTTML);
     // 这首歌各来源的结果记在 sources 里，来回切换来源时不重复请求；AMLL 歌词库未收录时不记，下次选择时重新查
     const cache = sources;
     const remember = (source, fetcher) => (cache[source] ??= fetcher().then((result) => {
@@ -1109,9 +1112,11 @@ export function mountLyrics({ root, toggle, bar, player, getMeta, t, notify, onL
   }
 
   /** 切换歌曲（id 为空表示没有歌曲）：歌词界面打开时取回新歌词原地刷新，没有歌词时只显示封面与播放控件 */
-  function setTrack(id, cc) {
+  let trackSource = 'apple';
+  function setTrack(id, cc, source = 'apple') {
     id = id || null;
-    if (id === adamId) return;
+    if (id === adamId && source === trackSource) return;
+    trackSource = source;
     adamId = id;
     country = cc || null;
     song = null;
