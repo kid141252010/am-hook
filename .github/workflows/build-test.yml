@@ -80,4 +80,4 @@ jobs:
       - name: Run QQ source tests
         # QQ DTOs, detail rendering, local favorites, artwork and separate source queues; offline
         if: runner.os == 'Linux'
-        run: node --test tests/qq_source.mjs tests/qq_ui.mjs tests/qq_joc_input.mjs tests/player_artwork.cjs
+        run: node --test tests/qq_source.mjs tests/qq_ui.mjs tests/qq_joc_input.mjs tests/player_artwork.cjs tests/player_quality.mjs

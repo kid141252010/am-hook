@@ -61,6 +61,25 @@ DAEAC3 通过同源 `/qq/song/:mid/download?quality=DAEAC3` 读取字节，`qq-j
 
 `/qq-song/:mid` 展示全部音质和中英标签、格式、大小及可用性。默认播放 HQ；详情页切换当前歌曲档位保留剩余队列与播放进度，重复播放及源切换恢复保持所选档位，向未激活的 QQ 队列添加歌曲不打断 Apple。歌词仍按 AMLL → TTML → QRC → LRC 降级，保留翻译与来源。
 
+## T2：播放器音质标与质量面板接入（2026-10-31）
+
+`src/ui/sources/qq.mjs` 的 `qualityVariant` / `qualityVariants` 将 `/qq/song/:mid/qualities` 返回的档位适配为播放器变体。只收 `available === true` 且 `playback` 为 `native` / `joc` 的行，保留 `quality`（同时作为 `group_id`）、`format`、`playback`、实际 `codec` / `codecs` 与 `contentType`。AC-4、NAC 等仅下载档与不可用档不进入播放器面板；浏览器能力不足的 native/JOC 档仍列出并置灰，能力检测使用 `detectQqModes`，不依赖 Apple 解密能力。
+
+队列解析和详情页的 `qualityItem` 不再写入占位的 `variants: []`。打开音质标时，`AmPlayer.variantsOf` 通过 `qq.qualities` 懒取真实档位，沿用 `variantCache` 的加载、错误、容量 20 与重新打开失败重试机制；缓存键为 `qq:<mid>`，与相同 ID 的 Apple 歌曲隔离。取回后把真实 variants 附到对应播放条目并重绘面板；空结果也缓存，延迟返回的 QQ 请求不会覆盖 Apple 面板。音质标显示当前 `QQ · <quality>` 并复用 Apple 面板的样式、当前档勾选与可访问性属性，原生播放说明使用独立的中英文文案。
+
+`switchVariant` 通过 QQ `variantItem` 生成匹配新档的条目，再走既有 `play` → `start`。native 使用显式 `/qq/song/:mid/play?quality=<quality>`；JOC 仍通过 `/qq/song/:mid/download?quality=DAEAC3` → `qq-joc-input` → `JocLiveEngine`。同一歌曲切档沿用 transport 当前进度，保留队列对象、位置、剩余歌曲与随机播放的原顺序。队列条目同步保存选中的档位、实际编码和格式，供重复播放及来源恢复使用。
+
+**当前档单一状态源及 T3 接口：** `src/ui/sources/qq.mjs` 导出的 `currentQuality`，初值仍为 `HQ`；唯一写入口是 `setCurrentQuality(quality)`（验证白名单）。播放器 `start` 在接受 QQ 档位时同步该状态；队列 `resolveEntry` 未指定档时，以及 `qualityEntry` / `qualityItem` 未传档位时均读取它。显式选档的队列条目继续保留自己的档位快照。T3 可在播放器初始化前调用 `setCurrentQuality` 接入设置默认值；本任务没有新增设置或持久化偏好。
+
+本轮验证：
+
+- `node --test --test-isolation=none tests/player_quality.mjs tests/qq_source.mjs tests/qq_joc_input.mjs tests/player_modes.cjs tests/player_buffering.cjs tests/player_artwork.cjs`：**52 项通过，0 失败**。新增 8 项面板 / variants / 状态回归与 1 项 native → JOC → native 切换回归；既有 Apple 模式、缓冲、封面测试及新增 Apple 面板/MSE 切档检查通过。未加 `--test-isolation=none` 的同组六个测试文件也全部通过；CI 的 QQ 测试步骤已包含新文件。
+- `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**67 项通过，0 失败，仅过滤指定 3 项 wrapper 测试**，包括静态资源构建一致性检查。
+- `cargo clippy --offline -p am-hook --all-targets -- -D warnings`：通过，无 warning。
+- 修改过的 JS/MJS 语法检查及 `git diff --check` 通过。
+
+以上为离线契约与播放路径回归。JOC 切档测试通过生产 `switchVariant` / `start` / `tryMode`、QQ 解包器与实际 `JocLiveEngine.load`，使用既有 E-AC-3 fixture 和 Worker / AudioContext 测试替身，验证选档 URL、进度、队列及取消；未将其描述为线上 QQ 实网试听。
+
 ## 本轮 AC-4 分类修正的离线验证（2026-10-31）
 
 - `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**67 项通过，0 失败，仅过滤指定的 3 个 wrapper 测试**。

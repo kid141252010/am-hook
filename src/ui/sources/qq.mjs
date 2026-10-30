@@ -31,6 +31,9 @@ export function qualityId(value = 'HQ') {
   if (!QUALITY_IDS.includes(value)) throw new Error('Invalid QQ quality');
   return value;
 }
+/** Shared selection for playback and new entries. Settings may initialize it through setCurrentQuality. */
+export let currentQuality = 'HQ';
+export function setCurrentQuality(quality) { currentQuality = qualityId(quality); }
 const qualityQuery = (quality) => quality === undefined ? '' : `?quality=${qualityId(quality)}`;
 export const songPath = (id) => `/qq-song/${mid(id)}`;
 export const playUrl = (id, quality) => `/qq/song/${mid(id)}/play${qualityQuery(quality)}`;
@@ -56,12 +59,25 @@ export function toTrack(dto) {
 export function entryOf(track) {
   return withIdentity({ ...track, track: track.id, artwork: artworkUrl(track.artwork) });
 }
-export function qualityEntry(track, quality, row) {
+export function qualityEntry(track, quality = currentQuality, row) {
   return { ...entryOf(track), quality: qualityId(quality), ...playbackInfo(quality, row) };
 }
-export function qualityItem(track, quality, row) {
-  return { ...qualityEntry(track, quality, row), id: `qq:${track.id}:${quality}`, title: track.name,
-    streamUrl: playUrl(track.id, quality), downloadUrl: downloadUrl(track.id, quality), label: `QQ · ${quality}`, variants: [] };
+export function qualityVariant(quality, row = {}) {
+  return { source: 'qq', group_id: qualityId(quality), quality, ...playbackInfo(quality, row),
+    format: typeof row.format === 'string' ? row.format : '' };
+}
+/** Local adapter URLs only; no resolved upstream URL is cached in a variant. */
+export function variantItem(id, variant) {
+  const quality = qualityId(variant.quality);
+  return { id: `qq:${mid(id)}:${quality}`, quality, ...playbackInfo(quality, variant), variant,
+    streamUrl: playUrl(id, quality), downloadUrl: downloadUrl(id, quality), label: `QQ · ${quality}` };
+}
+export function qualityItem(track, quality = currentQuality, row) {
+  return { ...qualityEntry(track, quality, row), ...variantItem(track.id, qualityVariant(quality, row)), title: track.name };
+}
+export function qualityVariants(rows) {
+  return rows.filter((row) => row.available === true && ['native', 'joc'].includes(row.playback))
+    .map((row) => qualityVariant(row.quality, row));
 }
 async function request(path, signal) {
   const response = await fetch(path, { signal });

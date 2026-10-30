@@ -1,11 +1,12 @@
 // Offline QQ contract / fallback / queue regression tests: node --test tests/qq_source.mjs
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import * as qq from '../src/ui/sources/qq.mjs';
 import { sourceOf, trackKey, withIdentity } from '../src/ui/sources/track.mjs';
 import { artUrl } from '../src/ui/library.mjs';
 const { AmPlayer, trackKey: playerKey, detectQqModes, useJocSettings } = createRequire(import.meta.url)('../src/ui/player.js');
+beforeEach(() => qq.setCurrentQuality('HQ'));
 
 const dto = {
   id: '0039MnYb0qxYhV', name: '晴天', artists: ['周杰伦'], album: '叶惠美', albumMid: '003DFRzD192KKD',
@@ -219,7 +220,7 @@ test('QQ plays the local 302 route through native audio without asking Apple for
   assert.equal(player.current.key, `qq:${dto.id}`);
   assert.equal(player.current.artwork, 'https://y.qq.com/music/photo_new/T002R500x500M000003DFRzD192KKD_5.jpg');
   assert.equal(player.queue.entries[0].artwork, player.current.artwork);
-  assert.equal(player.audio.src, `/qq/song/${dto.id}/play`);
+  assert.equal(player.audio.src, `/qq/song/${dto.id}/play?quality=HQ`);
   assert.equal(player.audio.paused, false);
 });
 

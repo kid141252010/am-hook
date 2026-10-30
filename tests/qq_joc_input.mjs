@@ -183,3 +183,63 @@ test('QQ PCM entry rejects download and native classifications before opening in
     }
   }
 });
+
+test('QQ quality switching enters JocLiveEngine through QQ input and resumes native playback without losing the queue', async () => {
+  const original = { AudioContext: globalThis.AudioContext, Worker: globalThis.Worker, fetch: globalThis.fetch,
+    quality: qq.currentQuality };
+  const methods = Object.fromEntries(['openDecoder', 'pump', 'seek'].map((name) =>
+    [name, Object.getOwnPropertyDescriptor(JocLiveEngine.prototype, name)]));
+  globalThis.AudioContext = function AudioContext() { return contextStub(); };
+  globalThis.Worker = WorkerStub;
+  const calls = [];
+  globalThis.fetch = async (url) => { calls.push(url); return { ok: true, arrayBuffer: async () => mp4().buffer }; };
+  JocLiveEngine.prototype.openDecoder = async () => {};
+  JocLiveEngine.prototype.pump = async () => {};
+  JocLiveEngine.prototype.seek = async function (time) { this.anchorTime = time; };
+  const player = Object.create(AmPlayer.prototype);
+  Object.assign(player, {
+    source: 'qq', playToken: 0, queueSerial: 0, nextSerial: 0, current: null, pcm: null, spatial: {},
+    unsupportedListeners: new Set(), mse: { destroy() {} },
+    audio: { volume: 0.4, duration: 240, paused: true, currentTime: 0, canPlayType: () => 'probably',
+      async play() { this.paused = false; }, pause() { this.paused = true; }, removeAttribute() {}, load() {} },
+  });
+  player.clock = player.audio;
+  for (const name of ['show', 'showError', 'setLoading', 'renderTrackText', 'renderArtwork', 'renderMode',
+    'emit', 'updateMediaSession', 'renderProgress', 'prepareNext', 'extendQueue', 'emitSpatial', 'updatePcm']) player[name] = () => {};
+  try {
+    qq.setCurrentQuality('HQ');
+    await player.playQueue([qq.entryOf(qq.toTrack({ id: 'WET' })), qq.entryOf(qq.toTrack({ id: 'next' }))]);
+    const queue = player.queue;
+    player.audio.currentTime = 0.25;
+    await player.switchVariant(qq.qualityVariant('DAEAC3', { format: 'E-AC-3 JOC' }));
+    const engine = player.pcm;
+    assert.ok(engine instanceof JocLiveEngine);
+    assert.deepEqual(calls, ['/qq/song/WET/download?quality=DAEAC3']);
+    assert.equal(player.current.mode, 'joc2');
+    assert.equal(engine.currentTime, 0.25);
+    assert.equal(engine.paused, false);
+    assert.equal(player.queue, queue);
+    assert.equal(queue.pos, 0);
+    assert.equal(queue.entries[0].quality, 'DAEAC3');
+    assert.equal(qq.currentQuality, 'DAEAC3');
+    engine.decoder.broken = true; // Do not retain the idle Worker timer in this test.
+    await player.switchVariant(qq.qualityVariant('SQ', { format: 'FLAC' }));
+    assert.equal(engine.controller.signal.aborted, true);
+    assert.equal(player.pcm, null);
+    assert.equal(player.current.mode, 'native');
+    assert.equal(player.audio.src, '/qq/song/WET/play?quality=SQ');
+    assert.equal(player.audio.currentTime, 0.25);
+    assert.equal(player.audio.paused, false);
+    assert.equal(player.queue, queue);
+    assert.equal(queue.entries[1].track, 'next');
+    assert.equal(qq.currentQuality, 'SQ');
+  } finally {
+    if (player.pcm) { if (player.pcm.decoder) player.pcm.decoder.broken = true; player.pcm.destroy(); }
+    for (const [name, descriptor] of Object.entries(methods)) {
+      if (descriptor) Object.defineProperty(JocLiveEngine.prototype, name, descriptor);
+      else delete JocLiveEngine.prototype[name];
+    }
+    globalThis.AudioContext = original.AudioContext; globalThis.Worker = original.Worker; globalThis.fetch = original.fetch;
+    qq.setCurrentQuality(original.quality);
+  }
+});

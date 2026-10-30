@@ -140,6 +140,7 @@
   }
 
   function variantLabel(v) {
+    if (v.source === 'qq') return `QQ · ${v.quality}`;
     const g = v.group_id.toLowerCase();
     if (g.includes('alac')) {
       const spec = [v.bit_depth && `${v.bit_depth}-bit`, v.sample_rate && `${(v.sample_rate / 1000).toFixed(1).replace(/\.0$/, '')} kHz`].filter(Boolean).join(' / ');
@@ -211,6 +212,11 @@
    * 其双耳渲染版本为 Spatial Audio；AAC、HE-AAC 与全景声的立体声缩混为 AAC
    */
   function qualityBadge(v) {
+    if (v?.source === 'qq') {
+      if (v.playback === 'joc') return 'atmos';
+      if (v.codec === 'flac') return v.quality === 'RS' ? 'hires' : 'lossless';
+      return v.codec === 'aac' ? 'lossy' : '';
+    }
     const g = ((v && v.group_id) || '').toLowerCase();
     if (!g) return '';
     if (g.includes('alac')) return v.sample_rate > 48000 ? 'hires' : 'lossless';
@@ -352,13 +358,10 @@
   async function resolveEntry(entry) {
     if (entry.source === 'qq') {
       if (!/^[0-9A-Za-z]{1,32}$/.test(entry.track)) throw new Error('Invalid QQ ID');
-      const quality = entry.quality ?? 'HQ';
       const qq = await loadQq();
-      qq.qualityId(quality);
-      return { ...entry, ...qq.playbackInfo(quality, entry), quality, source: 'qq', key: trackKey(entry), id: `qq:${entry.track}:${quality}`,
-        href: `/qq-song/${entry.track}`, title: entry.name,
-        streamUrl: `/qq/song/${entry.track}/play${entry.quality === undefined ? '' : `?quality=${quality}`}`,
-        downloadUrl: qq.downloadUrl(entry.track, quality), label: `QQ · ${quality}`, variants: [] };
+      const quality = entry.quality ?? qq.currentQuality;
+      return { ...entry, ...qq.variantItem(entry.track, qq.qualityVariant(quality, entry)), source: 'qq', key: trackKey(entry),
+        href: `/qq-song/${entry.track}`, title: entry.name };
     }
     const { variants } = await global.AmWrapper.songMaster(entry.track);
     const best = sortVariants(variants).find((v) => detectMode(v.codecs));
@@ -1766,7 +1769,7 @@
       // 音质详情（全屏播放界面里点音质标志弹出，见 renderQualityPanel）；app.html 把它放在全屏播放界面里
       this.qualityPanel = root.ownerDocument.getElementById('quality-panel')
         || root.appendChild(Object.assign(root.ownerDocument.createElement('div'), { className: 'quality-panel', hidden: true }));
-      /** 各歌曲的全部音质（track → Promise<variants>），条目里没带 variants 时（如歌曲页播放）打开详情才取 */
+      /** 各来源歌曲的音质状态（source:track → { loading, variants, error }），打开详情才取 */
       this.variantCache = new Map();
       this.$('.player-sub').classList.add('marquee', 'marquee--secondary');
       this.subMarquee = new Marquee(this.$('.player-sub'));
@@ -1843,10 +1846,9 @@
       if (!this.current) return;
       const c = this.current;
       const badge = this.$('.player-mode');
-      badge.disabled = c.source === 'qq';
-      if (c.source === 'qq') { badge.textContent = c.label; badge.hidden = false; badge.title = c.label; badge.setAttribute('aria-label', c.label); this.closeQualityPanel(); return; }
+      badge.disabled = false;
       const doc = this.root.ownerDocument;
-      const icon = qualityIcon(c.badge, doc);
+      const icon = c.source === 'qq' ? null : qualityIcon(c.badge, doc);
       if (icon) icon.removeAttribute('title');
       const label = icon ? icon.getAttribute('aria-label') : this.modeText();
       // JOC 渲染时图标后面注明，否则看不出没有走浏览器自己的解码
@@ -1882,6 +1884,7 @@
       if (panel.hidden || !c) return;
       const doc = this.root.ownerDocument;
       const v = c.variant || {};
+      const qq = c.source === 'qq';
       const joc = isJocMode(c.mode);
       const rows = [
         [t('player.mode'), this.modeText()],
@@ -1890,10 +1893,10 @@
         [t('player.jocGain'), joc ? `${jocSettings().gain} dB` : ''],
       ].filter(([, value]) => value);
       const note = joc ? [t('player.jocNotice'), c.mode === 'joc2' && this.jocFallback && t('player.jocHrtfMissing')].filter(Boolean).join(' ')
-        : t(c.mode === 'ec3' ? 'player.pcmNotice' : c.mode === 'flac' ? 'player.flacNotice' : 'player.mseNotice');
+        : t(qq ? 'player.nativeNotice' : c.mode === 'ec3' ? 'player.pcmNotice' : c.mode === 'flac' ? 'player.flacNotice' : 'player.mseNotice');
       const list = el(doc, 'div', 'quality-panel-list');
       panel.replaceChildren(
-        el(doc, 'div', 'quality-panel-head', qualityIcon(c.badge, doc), el(doc, 'span', 'quality-panel-label', c.label || codecName(c.codecs))),
+        el(doc, 'div', 'quality-panel-head', qualityIcon(qq ? qualityBadge(v) : c.badge, doc), el(doc, 'span', 'quality-panel-label', c.label || codecName(c.codecs))),
         el(doc, 'dl', 'quality-panel-specs', ...rows.flatMap(([key, value]) => [el(doc, 'dt', '', key), el(doc, 'dd', '', value)])),
         el(doc, 'p', 'quality-panel-note', note),
         ...(isEc3(c.codecs) && jocStore ? this.jocSwitch(doc) : []),
@@ -1903,9 +1906,10 @@
       if (state.loading) list.append(el(doc, 'p', 'quality-panel-status', t('player.qualitiesLoading')));
       else if (state.error) list.append(el(doc, 'p', 'quality-panel-status', t('player.qualitiesFailed', { msg: state.error })));
       for (const variant of sortVariants(state.variants || [])) {
-        const id = `${c.track}:${variant.group_id}`;
-        const playable = detectModes(variant.codecs).length > 0;
-        const spec = [codecName(variant.codecs), formatRate(variant.bandwidth), ...variantTags(variant), !playable && t('row.downloadOnly')];
+        const id = qq ? `qq:${c.track}:${variant.quality}` : `${c.track}:${variant.group_id}`;
+        const playable = (qq ? detectQqModes(variant, this.audio) : detectModes(variant.codecs)).length > 0;
+        const spec = qq ? [variant.format || codecName(variant.codecs)]
+          : [codecName(variant.codecs), formatRate(variant.bandwidth), ...variantTags(variant), !playable && t('row.downloadOnly')];
         const button = el(doc, 'button', 'quality-option',
           qualityIcon(qualityBadge(variant), doc),
           el(doc, 'span', 'quality-option-text',
@@ -1926,18 +1930,26 @@
 
     /**
      * 歌曲的全部音质：{ variants } / { loading } / { error }。条目带着 variants（队列播放）时直接用，
-     * 否则（如歌曲页播放）向 wrapper-lite 取一次 master，按歌曲缓存，取回后重绘详情
+     * 否则向 wrapper-lite 取 master / QQ 取 qualities，按来源与歌曲缓存，取回后重绘详情
      */
     variantsOf(item) {
-      if (item.source === 'qq') return { variants: [] };
-      if (item.variants) return { variants: item.variants };
+      const qq = item.source === 'qq';
+      if (item.variants && (!qq || item.variants.length)) return { variants: item.variants };
       const cached = this.variantCache.get(trackKey(item));
       if (cached) return cached;
       const state = { loading: true };
       this.variantCache.set(trackKey(item), state);
       if (this.variantCache.size > 20) this.variantCache.delete(this.variantCache.keys().next().value);
-      global.AmWrapper.songMaster(item.track)
-        .then(({ variants }) => { state.variants = variants; }, (err) => { state.error = err.message || String(err); })
+      const request = qq ? loadQq().then(async (source) => ({ variants: source.qualityVariants(await source.qualities(item.track)) }))
+        : global.AmWrapper.songMaster(item.track);
+      request
+        .then(({ variants }) => {
+          state.variants = variants;
+          if (qq) {
+            item.variants = variants;
+            if (this.current && trackKey(this.current) === trackKey(item)) this.current.variants = variants;
+          }
+        }, (err) => { state.error = err.message || String(err); })
         .finally(() => {
           state.loading = false;
           if (this.current && trackKey(this.current) === trackKey(item)) this.renderQualityPanel();
@@ -2039,11 +2051,18 @@
     }
 
     /** 换成同一首歌的另一种音质 */
-    switchVariant(variant) {
+    async switchVariant(variant) {
       const c = this.current;
+      if (c?.source === 'qq') {
+        const qq = await loadQq();
+        if (this.current !== c || c.quality === variant.quality || variant.source !== 'qq'
+            || !detectQqModes(variant, this.audio).length) return;
+        const { mode, duration, ...item } = c;
+        return this.play({ ...item, ...qq.variantItem(c.track, variant) });
+      }
       if (!c || c.id === `${c.track}:${variant.group_id}`) return;
       const { mode, duration, ...item } = c;
-      this.play({ ...item, ...variantItem(c.track, variant) });
+      return this.play({ ...item, ...variantItem(c.track, variant) });
     }
 
     openQualityPanel() {
@@ -2715,11 +2734,6 @@
       this.switchSource(item.source, false);
       // 单独播放另一首歌时结束队列；同一首歌切换音质时保留
       if (this.queue && trackKey(item) !== trackKey(this.queue.entries[this.queue.pos])) this.clearQueue();
-      if (item.source === 'qq' && this.queue?.entries[this.queue.pos]) {
-        // Keep the selected quality when this entry repeats or its source context is restored.
-        Object.assign(this.queue.entries[this.queue.pos], { quality: item.quality, playback: item.playback,
-          codec: item.codec, codecs: item.codecs, contentType: item.contentType });
-      }
       return this.start(item);
     }
 
@@ -2917,9 +2931,20 @@
         return;
       }
       const token = ++this.playToken;
+      if (item.source === 'qq') {
+        const qq = await loadQq();
+        if (token !== this.playToken) return;
+        qq.setCurrentQuality(item.quality ?? qq.currentQuality);
+      }
       // 同一首歌切换音质时从当前位置继续；专辑页换曲（track 不同）从头播放
       const resumeAt = savedTime ?? (this.current && trackKey(this.current) === trackKey(item) ? this.transport().currentTime : 0);
       this.current = { ...item, mode: modes[0], duration: 0 };
+      const entry = this.queue?.entries[this.queue.pos];
+      if (item.source === 'qq' && entry && trackKey(entry) === trackKey(item)) {
+        // Repeat and source restoration keep the selected payload, including API format overrides.
+        Object.assign(entry, { quality: item.quality, playback: item.playback, codec: item.codec,
+          codecs: item.codecs, contentType: item.contentType, format: item.variant?.format });
+      }
       this.show();
       this.showError('');
       this.renderTrackText();
