@@ -126,6 +126,8 @@ pub struct Qq {
     permits: tokio::sync::Semaphore,
     searches: Cache<SearchResult>,
     songs: Cache<Song>,
+    infos: Cache<Value>,
+    audio: Cache<Audio>,
     lyrics: Cache<Lyrics>,
 }
 impl Qq {
@@ -164,6 +166,8 @@ impl Qq {
             permits: tokio::sync::Semaphore::new(8),
             searches: Cache::new(128, 600),
             songs: Cache::new(4096, 86400),
+            infos: Cache::new(4096, 86400),
+            audio: Cache::new(4096, 300),
             lyrics: Cache::new(1024, 604800),
         })
     }
@@ -268,47 +272,231 @@ impl Qq {
         if let Some(song) = self.songs.get(mid) {
             return Ok(song);
         }
+        let data = self.info_data(mid).await?;
+        self.song_from_info(mid, &data)
+    }
+    async fn info_data(&self, mid: &str) -> ApiResult<Value> {
+        if let Some(data) = self.infos.get(mid) {
+            return Ok(data);
+        }
         let data = self
             .request(
                 "/extra/music/info",
                 &[("platform", "qq".into()), ("mids", mid.into())],
             )
             .await?;
-        self.song_from_info(mid, &data)
+        self.song_from_info(mid, &data)?;
+        self.infos.put(mid.into(), data.clone());
+        Ok(data)
     }
     fn song_from_info(&self, mid: &str, data: &Value) -> ApiResult<Song> {
-        // Both the normalized search dialect and QQ's native track_info dialect.
-        let rows = data
-            .as_array()
-            .or_else(|| data.get("data").and_then(Value::as_array));
-        let raw = rows
-            .and_then(|a| a.first())
-            .or_else(|| data.as_object().and_then(|map| map.get(mid)))
-            .unwrap_or_else(|| data.get("data").unwrap_or(data));
-        let song = self
-            .song_dto(raw.get("track_info").unwrap_or(raw))
-            .ok_or_else(missing)?;
+        let song = self.song_dto(track_info(mid, data)).ok_or_else(missing)?;
         if song.id != mid {
             return Err(missing());
         }
         Ok(song)
     }
-    async fn audio_url(&self, mid: &str) -> ApiResult<reqwest::Url> {
+    async fn audio_url(&self, mid: &str, quality: Quality) -> ApiResult<Audio> {
+        let key = quality.cache_key(mid);
+        if let Some(audio) = self.audio.get(&key) {
+            return Ok(audio);
+        }
         let data = self
             .request(
                 "/extra/music/url",
                 &[
                     ("platform", "qq".into()),
                     ("mid", mid.into()),
-                    ("music_quality", "HQ".into()),
+                    ("music_quality", quality.name().into()),
                     ("audio_api", "2".into()),
                 ],
             )
             .await?;
-        data.pointer("/0/track_info/file_url")
-            .and_then(Value::as_str)
-            .and_then(cdn_url)
-            .ok_or_else(unavailable)
+        let audio = Audio::from_response(&data)?;
+        self.audio.put(key, audio.clone());
+        Ok(audio)
+    }
+    async fn qualities(&self, mid: &str) -> ApiResult<Qualities> {
+        // One info request supplies all size fields, shared with the song route.
+        let data = self.info_data(mid).await?;
+        let file = &track_info(mid, &data)["file"];
+        let qualities =
+            futures::future::join_all(QUALITY_LIST.into_iter().map(|quality| async move {
+                if let Some(field) = quality.size_field() {
+                    QualityRow::from_size(quality, byte_size(&file[field]), quality.format())
+                } else {
+                    // Unmapped tiers are probed separately, through the same short-lived
+                    // (mid, quality) cache used by playback and download.
+                    let audio = self.audio_url(mid, quality).await.ok();
+                    QualityRow::from_audio(quality, file, audio.as_ref())
+                }
+            }))
+            .await;
+        Ok(Qualities { qualities })
+    }
+}
+fn track_info<'a>(mid: &str, data: &'a Value) -> &'a Value {
+    // Both the normalized search dialect and QQ's native track_info dialect.
+    let rows = data
+        .as_array()
+        .or_else(|| data.get("data").and_then(Value::as_array));
+    let raw = rows
+        .and_then(|a| a.first())
+        .or_else(|| data.as_object().and_then(|map| map.get(mid)))
+        .unwrap_or_else(|| data.get("data").unwrap_or(data));
+    raw.get("track_info").unwrap_or(raw)
+}
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+enum Quality {
+    Hq,
+    Sq,
+    Web,
+    Nac,
+    Rs,
+}
+const QUALITY_LIST: [Quality; 5] = [
+    Quality::Hq,
+    Quality::Sq,
+    Quality::Web,
+    Quality::Nac,
+    Quality::Rs,
+];
+impl Quality {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hq => "HQ",
+            Self::Sq => "SQ",
+            Self::Web => "WEB",
+            Self::Nac => "NAC",
+            Self::Rs => "RS",
+        }
+    }
+    fn cache_key(self, mid: &str) -> String {
+        format!("{mid}:{}", self.name())
+    }
+    fn size_field(self) -> Option<&'static str> {
+        // HQ was cross-checked with /extra/music/url: file_size = 10,792,943,
+        // exactly track_info.file.size_320mp3 for 0039MnYb0qxYhV (320 kbps MP3).
+        // SQ -> size_flac and RS -> size_hires are semantic candidates only;
+        // WEB is ambiguous and NAC has no dedicated field. Network verification
+        // of these four tiers was blocked, so do not freeze guessed mappings:
+        // their cached URL probes compare file_size with the file fields below.
+        match self {
+            Self::Hq => Some("size_320mp3"),
+            _ => None,
+        }
+    }
+    fn format(self) -> &'static str {
+        match self {
+            Self::Hq => "MP3 320 kbps",
+            Self::Sq => "Lossless",
+            Self::Web => "Web audio",
+            Self::Nac => "AICodec",
+            Self::Rs => "Hi-Res",
+        }
+    }
+}
+fn byte_size(value: &Value) -> Option<u64> {
+    value.as_u64().filter(|size| *size > 0)
+}
+// These are file-field semantics, not guessed quality-to-field mappings. A
+// positive /url file_size must match before using a field's codec description.
+const FILE_FORMATS: &[(&str, &str)] = &[
+    ("size_128mp3", "MP3 128 kbps"),
+    ("size_320mp3", "MP3 320 kbps"),
+    ("size_192aac", "AAC 192 kbps"),
+    ("size_96aac", "AAC 96 kbps"),
+    ("size_48aac", "AAC 48 kbps"),
+    ("size_24aac", "AAC 24 kbps"),
+    ("size_192ogg", "Ogg 192 kbps"),
+    ("size_96ogg", "Ogg 96 kbps"),
+    ("size_flac", "FLAC"),
+    ("size_ape", "APE"),
+    ("size_hires", "FLAC Hi-Res"),
+];
+#[derive(Clone)]
+struct Audio {
+    url: reqwest::Url,
+    size_bytes: Option<u64>,
+}
+impl Audio {
+    fn from_response(data: &Value) -> ApiResult<Self> {
+        let track = data.pointer("/0/track_info").ok_or_else(unavailable)?;
+        Ok(Self {
+            url: track["file_url"]
+                .as_str()
+                .and_then(cdn_url)
+                .ok_or_else(unavailable)?,
+            size_bytes: byte_size(&track["file_size"]),
+        })
+    }
+    fn format(&self, quality: Quality, file: &Value) -> &'static str {
+        let mut matching = FILE_FORMATS.iter().filter(|(field, _)| {
+            self.size_bytes.is_some() && byte_size(&file[*field]) == self.size_bytes
+        });
+        if let Some((_, format)) = matching.next() {
+            if matching.next().is_none() {
+                return format;
+            }
+        }
+        // No unique field match: identify only the extension we actually got.
+        match self
+            .url
+            .path()
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "mp3" => "MP3",
+            "m4a" | "aac" => "AAC",
+            "flac" => "FLAC",
+            "ape" => "APE",
+            "ogg" => "Ogg",
+            _ => quality.format(),
+        }
+    }
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QualityRow {
+    quality: Quality,
+    available: bool,
+    size_bytes: Option<u64>,
+    format: &'static str,
+}
+impl QualityRow {
+    fn from_size(quality: Quality, size_bytes: Option<u64>, format: &'static str) -> Self {
+        let size_bytes = size_bytes.filter(|size| *size > 0);
+        Self {
+            quality,
+            available: size_bytes.is_some(),
+            size_bytes,
+            format,
+        }
+    }
+    fn from_audio(quality: Quality, file: &Value, audio: Option<&Audio>) -> Self {
+        let audio = audio.filter(|audio| audio.size_bytes.is_some());
+        Self::from_size(
+            quality,
+            audio.and_then(|a| a.size_bytes),
+            audio.map_or(quality.format(), |a| a.format(quality, file)),
+        )
+    }
+}
+#[derive(Serialize)]
+struct Qualities {
+    qualities: Vec<QualityRow>,
+}
+#[derive(Default, Deserialize)]
+struct QualityQuery {
+    quality: Option<Quality>,
+}
+impl QualityQuery {
+    fn quality(&self) -> Quality {
+        self.quality.unwrap_or(Quality::Hq)
     }
 }
 fn string(v: &Value) -> String {
@@ -360,11 +548,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/qq/song/:mid/play", get(play))
         .route("/qq/song/:mid/download", get(download))
         .route("/qq/song/:mid/lyrics", get(lyrics))
+        .route("/qq/song/:mid/qualities", get(qualities))
         .route("/qq/capabilities", get(capabilities))
 }
 async fn capabilities(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
     adapter(&state)?;
-    Ok(Json(json!({"enabled": true, "qualities": ["HQ"]})))
+    Ok(Json(json!({"enabled": true, "qualities": QUALITY_LIST})))
 }
 async fn search(
     State(state): State<Arc<AppState>>,
@@ -414,11 +603,25 @@ async fn info(
     check_mid(&mid)?;
     Ok(Json(qq.song(&mid).await?))
 }
-async fn play(State(state): State<Arc<AppState>>, Path(mid): Path<String>) -> ApiResult<Response> {
+async fn qualities(
+    State(state): State<Arc<AppState>>,
+    Path(mid): Path<String>,
+) -> ApiResult<Json<Qualities>> {
+    let qq = adapter(&state)?;
+    check_mid(&mid)?;
+    Ok(Json(qq.qualities(&mid).await?))
+}
+async fn play(
+    State(state): State<Arc<AppState>>,
+    Path(mid): Path<String>,
+    Query(query): Query<QualityQuery>,
+) -> ApiResult<Response> {
     let qq = adapter(&state)?;
     check_mid(&mid)?;
     // Only this response can expose file_url; JSON DTOs have no audio URL field.
-    Ok(play_redirect(&qq.audio_url(&mid).await?))
+    Ok(play_redirect(
+        &qq.audio_url(&mid, query.quality()).await?.url,
+    ))
 }
 fn play_redirect(url: &reqwest::Url) -> Response {
     Response::builder()
@@ -445,27 +648,41 @@ fn download_disposition(song: &Song, url: &reqwest::Url) -> String {
     let encoded: String = name.bytes().map(|b| format!("%{b:02X}")).collect();
     format!("attachment; filename=\"download.{ext}\"; filename*=UTF-8''{encoded}")
 }
+fn download_content_type(url: &reqwest::Url) -> &'static str {
+    match url
+        .path()
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" => "audio/ogg",
+        "ape" => "audio/x-ape",
+        _ => "application/octet-stream",
+    }
+}
 async fn download(
     State(state): State<Arc<AppState>>,
     Path(mid): Path<String>,
+    Query(query): Query<QualityQuery>,
 ) -> ApiResult<Response> {
     let qq = adapter(&state)?;
     check_mid(&mid)?;
     let song = qq.song(&mid).await?;
-    let url = qq.audio_url(&mid).await?;
-    let response = qq
-        .media
-        .get(url.clone())
-        .send()
-        .await
-        .map_err(network)?;
+    let url = qq.audio_url(&mid, query.quality()).await?.url;
+    let response = qq.media.get(url.clone()).send().await.map_err(network)?;
     let status = response.status();
     if !status.is_success() {
         tracing::warn!("qq download upstream status: {status}");
         return Err(unavailable());
     }
     let mut out = Response::builder()
-        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_TYPE, download_content_type(&url))
         .header(
             header::CONTENT_DISPOSITION,
             download_disposition(&song, &url),

@@ -357,7 +357,7 @@ async fn proxy_is_not_exposed_in_capabilities_or_host_config() {
         if path == "/qq/capabilities" {
             assert_eq!(
                 serde_json::from_str::<Value>(&body).unwrap(),
-                json!({"enabled":true,"qualities":["HQ"]})
+                json!({"enabled":true,"qualities":["HQ", "SQ", "WEB", "NAC", "RS"]})
             );
         }
     }
@@ -372,6 +372,7 @@ async fn unconfigured_routes_are_404_even_with_missing_or_invalid_parameters() {
         "/qq/song/a/play",
         "/qq/song/a/download",
         "/qq/song/a/lyrics",
+        "/qq/song/a/qualities",
         "/qq/unknown",
     ] {
         assert_eq!(
@@ -389,6 +390,7 @@ async fn configured_routes_validate_mid_and_serve_only_cached_dtos() {
         "/qq/song/a%21/play",
         "/qq/song/a%21/download",
         "/qq/song/a%21/lyrics",
+        "/qq/song/a%21/qualities",
     ] {
         assert_eq!(
             get(state.clone(), path).await.status(),
@@ -482,5 +484,213 @@ fn covers_preserve_upstream_urls_and_use_the_existing_qq_domain_as_fallback() {
             qq.song_dto(&raw).unwrap().cover,
             "https://y.gtimg.cn/music/photo_new/T002R{w}x{h}M000003DFRzD192KKD.jpg"
         );
+    }
+}
+
+fn audio(quality: Quality, size: Option<u64>, extension: &str) -> Audio {
+    Audio {
+        url: reqwest::Url::parse(&format!(
+            "https://isure.stream.qqmusic.qq.com/{}.{}?vkey=private",
+            quality.name(),
+            extension
+        ))
+        .unwrap(),
+        size_bytes: size,
+    }
+}
+
+#[test]
+fn quality_sizes_use_only_positive_bytes_and_verified_mapping() {
+    assert_eq!(Quality::Hq.size_field(), Some("size_320mp3"));
+    for quality in [Quality::Sq, Quality::Web, Quality::Nac, Quality::Rs] {
+        // Do not silently promote semantic guesses to verified mappings.
+        assert!(quality.size_field().is_none());
+    }
+    for value in [Value::Null, json!(0), json!(-1), json!(1.5), json!("123")] {
+        let row = QualityRow::from_size(Quality::Hq, byte_size(&value), Quality::Hq.format());
+        assert!(!row.available);
+        assert!(row.size_bytes.is_none());
+    }
+    let row = QualityRow::from_size(
+        Quality::Hq,
+        byte_size(&json!(10792943)),
+        Quality::Hq.format(),
+    );
+    assert!(row.available);
+    assert_eq!(row.size_bytes, Some(10792943));
+    assert_eq!(row.format, "MP3 320 kbps");
+}
+
+#[test]
+fn probe_sizes_cross_check_file_fields_before_describing_the_format() {
+    let file = json!({
+        "size_128mp3": 4317292, "size_320mp3": 10792943,
+        "size_flac": 55397039, "size_192aac": 6519764, "size_hires": 90000000
+    });
+    for (quality, size, extension, expected) in [
+        (Quality::Sq, 55397039, "flac", "FLAC"),
+        (Quality::Web, 6519764, "m4a", "AAC 192 kbps"),
+        (Quality::Rs, 90000000, "flac", "FLAC Hi-Res"),
+        (Quality::Nac, 2222222, "nac", "AICodec"),
+    ] {
+        let source = audio(quality, Some(size), extension);
+        let row = QualityRow::from_audio(quality, &file, Some(&source));
+        assert!(row.available);
+        assert_eq!(row.size_bytes, Some(size));
+        assert_eq!(row.format, expected);
+    }
+    // WEB is deliberately not assumed to be AAC: a MP3-sized result describes MP3.
+    let source = audio(Quality::Web, Some(4317292), "mp3");
+    assert_eq!(source.format(Quality::Web, &file), "MP3 128 kbps");
+    // Equal-size fields are ambiguous: only the actual extension is described.
+    assert_eq!(
+        source.format(
+            Quality::Web,
+            &json!({"size_128mp3":4317292,"size_192aac":4317292})
+        ),
+        "MP3"
+    );
+    let source = audio(Quality::Sq, None, "flac");
+    assert!(!QualityRow::from_audio(Quality::Sq, &file, Some(&source)).available);
+    assert!(!QualityRow::from_audio(Quality::Sq, &file, None).available);
+}
+
+#[test]
+fn audio_response_requires_a_public_qq_url_and_treats_missing_sizes_as_unavailable() {
+    let valid = "https://isure.stream.qqmusic.qq.com/song.mp3?vkey=private";
+    let source =
+        Audio::from_response(&json!([{"track_info":{"file_url":valid,"file_size":10792943}}]))
+            .ok()
+            .unwrap();
+    assert_eq!(source.size_bytes, Some(10792943));
+    for track in [
+        json!({"file_url":valid}),
+        json!({"file_url":valid,"file_size":0}),
+    ] {
+        assert!(Audio::from_response(&json!([{"track_info":track}]))
+            .ok()
+            .unwrap()
+            .size_bytes
+            .is_none());
+    }
+    for data in [
+        json!([]),
+        json!([{"track_info":{"file_url":"https://example.invalid/private"}}]),
+    ] {
+        assert!(Audio::from_response(&data).is_err());
+    }
+}
+
+#[test]
+fn download_content_types_follow_an_allowlisted_file_extension() {
+    for (extension, expected) in [
+        ("mp3", "audio/mpeg"),
+        ("FLAC", "audio/flac"),
+        ("m4a", "audio/mp4"),
+        ("aac", "audio/aac"),
+        ("ogg", "audio/ogg"),
+        ("ape", "audio/x-ape"),
+        ("nac", "application/octet-stream"),
+        ("html", "application/octet-stream"),
+    ] {
+        let url =
+            reqwest::Url::parse(&format!("https://y.qq.com/song.{extension}?x=.html")).unwrap();
+        assert_eq!(download_content_type(&url), expected);
+    }
+}
+
+#[tokio::test]
+async fn quality_parameters_are_validated_before_upstream_requests() {
+    let state = state(true);
+    for action in ["play", "download"] {
+        for quality in ["", "hq", "invalid", "HQ%20", "HQ%26SQ", "null"] {
+            let path = format!("/qq/song/abc/{action}?quality={quality}");
+            assert_eq!(
+                get(state.clone(), &path).await.status(),
+                StatusCode::BAD_REQUEST,
+                "{path}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn playback_defaults_to_hq_and_caches_are_isolated_by_quality() {
+    let state = state(true);
+    let qq = state.qq.as_ref().unwrap();
+    for quality in QUALITY_LIST {
+        qq.audio
+            .put(quality.cache_key("abc"), audio(quality, Some(123), "mp3"));
+    }
+    assert!(qq.audio.get(&Quality::Hq.cache_key("other")).is_none());
+    for quality in QUALITY_LIST {
+        let path = format!("/qq/song/abc/play?quality={}", quality.name());
+        let response = get(state.clone(), &path).await;
+        assert_eq!(response.status(), StatusCode::FOUND, "{path}");
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            audio(quality, Some(123), "mp3").url.as_str()
+        );
+    }
+    let response = get(state.clone(), "/qq/song/abc/play").await;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        audio(Quality::Hq, Some(123), "mp3").url.as_str()
+    );
+}
+
+#[tokio::test]
+async fn qualities_endpoint_returns_all_tiers_and_uses_shared_cached_probes() {
+    let state = state(true);
+    let qq = state.qq.as_ref().unwrap();
+    qq.infos.put(
+        "abc".into(),
+        json!({"abc":{"track_info":{"mid":"abc","file":{
+            "size_320mp3":10792943,"size_flac":55397039,"size_192aac":6519764,"size_hires":0
+        }}}}),
+    );
+    for (quality, size, extension) in [
+        (Quality::Sq, Some(55397039), "flac"),
+        (Quality::Web, Some(6519764), "m4a"),
+        (Quality::Nac, None, "nac"),
+        (Quality::Rs, None, "flac"),
+    ] {
+        qq.audio
+            .put(quality.cache_key("abc"), audio(quality, size, extension));
+    }
+    // HQ is fully derived from info and must not require a cached or live audio URL.
+    assert!(qq.audio.get(&Quality::Hq.cache_key("abc")).is_none());
+    let response = get(state.clone(), "/qq/song/abc/qualities").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body,
+        json!({"qualities":[
+            {"quality":"HQ","available":true,"sizeBytes":10792943,"format":"MP3 320 kbps"},
+            {"quality":"SQ","available":true,"sizeBytes":55397039,"format":"FLAC"},
+            {"quality":"WEB","available":true,"sizeBytes":6519764,"format":"AAC 192 kbps"},
+            {"quality":"NAC","available":false,"sizeBytes":null,"format":"AICodec"},
+            {"quality":"RS","available":false,"sizeBytes":null,"format":"Hi-Res"}
+        ]})
+    );
+    for private in ["vkey", "file_url", "qqmusic.qq.com", "example.invalid"] {
+        assert!(!body.to_string().contains(private));
+    }
+
+    // A live URL for another tier cannot make a zero or missing HQ size available.
+    // No audio cache entry exists for HQ, so these requests also prove it does not probe HQ.
+    for file in [json!({"size_320mp3":0}), json!({})] {
+        qq.infos.put(
+            "abc".into(),
+            json!({"abc":{"track_info":{"mid":"abc","file":file}}}),
+        );
+        let response = get(state.clone(), "/qq/song/abc/qualities").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["qualities"][0]["available"], false);
+        assert_eq!(body["qualities"][0]["sizeBytes"], Value::Null);
     }
 }
