@@ -217,6 +217,52 @@ fn native_qq_info_dialect_is_supported() {
     assert!(song.vip);
 }
 #[test]
+fn song_info_accepts_mid_keyed_map_on_cache_miss() {
+    let qq = qq();
+    let mid = "0039MnYb0qxYhV";
+    let data = json!({
+        "other123": {"track_info": {"mid": "other123"}},
+        (mid): {"track_info": {"mid": mid, "title": "晴天"}}
+    });
+    assert!(qq.songs.get(mid).is_none());
+    let song = qq.song_from_info(mid, &data).ok().unwrap();
+    assert_eq!(song.id, mid);
+    assert_eq!(song.name, "晴天");
+    assert_eq!(qq.songs.get(mid).unwrap().id, mid);
+}
+#[test]
+fn song_info_returns_missing_when_map_key_does_not_match() {
+    let qq = qq();
+    let mid = "0039MnYb0qxYhV";
+    // Even matching track metadata must not be selected under another key.
+    let data = json!({"other123": {"track_info": {"mid": mid, "title": "晴天"}}});
+    let error = qq.song_from_info(mid, &data).err().unwrap();
+    assert_eq!(error.0, StatusCode::NOT_FOUND);
+    assert!(qq.songs.get(mid).is_none());
+}
+#[test]
+fn song_info_checks_track_id_after_matching_map_key() {
+    let mid = "0039MnYb0qxYhV";
+    let data = json!({(mid): {"track_info": {"mid": "other123"}}});
+    let error = qq().song_from_info(mid, &data).err().unwrap();
+    assert_eq!(error.0, StatusCode::NOT_FOUND);
+}
+#[test]
+fn song_info_preserves_existing_response_shapes() {
+    let mid = "0039MnYb0qxYhV";
+    let raw = raw_song();
+    for data in [
+        json!([raw]),
+        json!({"data": [raw]}),
+        json!({"data": raw}),
+        raw,
+    ] {
+        let song = qq().song_from_info(mid, &data).ok().unwrap();
+        assert_eq!(song.id, mid);
+        assert_eq!(song.name, "晴天");
+    }
+}
+#[test]
 fn caches_expire_and_are_bounded() {
     let cache = Cache::new(2, 60);
     cache.put("a".into(), 1);

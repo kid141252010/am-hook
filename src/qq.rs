@@ -272,13 +272,17 @@ impl Qq {
                 &[("platform", "qq".into()), ("mids", mid.into())],
             )
             .await?;
+        self.song_from_info(mid, &data)
+    }
+    fn song_from_info(&self, mid: &str, data: &Value) -> ApiResult<Song> {
         // Both the normalized search dialect and QQ's native track_info dialect.
         let rows = data
             .as_array()
             .or_else(|| data.get("data").and_then(Value::as_array));
         let raw = rows
             .and_then(|a| a.first())
-            .unwrap_or_else(|| data.get("data").unwrap_or(&data));
+            .or_else(|| data.as_object().and_then(|map| map.get(mid)))
+            .unwrap_or_else(|| data.get("data").unwrap_or(data));
         let song = self
             .song_dto(raw.get("track_info").unwrap_or(raw))
             .ok_or_else(missing)?;
