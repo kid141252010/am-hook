@@ -337,13 +337,19 @@ test('switching source invalidates a pending Apple resolution before it can repl
 });
 
 
-test('AAC/OGG and multichannel FLAC tiers are native; all four Dolby tiers select JOC', () => {
+test('AAC/OGG and multichannel FLAC are native; only DAEAC3 among Dolby tiers selects JOC', () => {
   for (const quality of ['AAC48', 'WEB', 'AAC192', 'OGG96', 'OGG192', 'QAI', 'Q360V1', 'Q360V2']) {
     assert.equal(qq.playbackInfo(quality).playback, 'native', quality);
   }
-  for (const quality of ['DA', 'DAEAC3', 'DA448', 'DA1500']) {
-    assert.equal(qq.playbackInfo(quality).playback, 'joc', quality);
-    assert.equal(qq.playbackInfo(quality, { codec: 'ac-4' }).playback, 'download', quality);
+  for (const [quality, playback, codec] of [
+    ['DA', 'download', 'ac-4'], ['DA448', 'download', 'ac-4'], ['DA1500', 'download', 'ac-4'], ['DAEAC3', 'joc', 'ec-3'],
+  ]) {
+    for (const row of [{}, { playback: 'joc', codec: 'ec-3' }, { playback: 'native', codec: 'flac' }, { codec: 'ac-4' }]) {
+      const info = qq.playbackInfo(quality, row);
+      assert.equal(info.playback, playback, quality);
+      assert.equal(info.codec, codec, quality);
+      assert.equal(info.contentType, `audio/mp4; codecs="${codec}"`);
+    }
   }
   for (const quality of ['NAC', 'DTS', 'DTSX', 'RA360']) {
     assert.equal(qq.playbackInfo(quality, { codec: 'flac' }).playback, 'download', quality);
@@ -353,8 +359,8 @@ test('AAC/OGG and multichannel FLAC tiers are native; all four Dolby tiers selec
 });
 
 test('QQ rows keep downloads when codecs or browser capabilities prevent playback', () => {
-  const data = { qualities: ['NAC', 'DTS', 'DTSX', 'RA360', 'DA', 'OGG96', 'AAC48', 'QAI'].map((quality) => ({
-    quality, available: true, sizeBytes: 1024, ...(quality === 'DA' ? { codec: 'ac-4' } : {}),
+  const data = { qualities: ['NAC', 'DTS', 'DTSX', 'RA360', 'DA', 'DA448', 'DA1500', 'OGG96', 'AAC48', 'QAI'].map((quality) => ({
+    quality, available: true, sizeBytes: 1024,
   })) };
   const rows = qq.qualityRows(data, dto.id, (info) => detectQqModes(info, { canPlayType: (mime) => mime.startsWith('audio/mp4') ? 'maybe' : '' }));
   for (const row of rows.filter((row) => row.available)) {
@@ -371,22 +377,50 @@ test('QQ JOC capability detection is independent of Apple decryption and honors 
   globalThis.AmDecrypt = undefined;
   try {
     useJocSettings({ get: () => ({ mode: 'binaural' }) });
-    assert.deepEqual(detectQqModes(qq.playbackInfo('DA448')), ['jocbin', 'joc2']);
+    assert.deepEqual(detectQqModes(qq.playbackInfo('DAEAC3')), ['jocbin', 'joc2']);
+    for (const quality of ['DA', 'DA448', 'DA1500']) assert.deepEqual(detectQqModes(qq.playbackInfo(quality)), []);
     useJocSettings({ get: () => ({ mode: 'off' }) });
-    assert.deepEqual(detectQqModes(qq.playbackInfo('DA1500')), ['joc2']);
+    assert.deepEqual(detectQqModes(qq.playbackInfo('DAEAC3')), ['joc2']);
     globalThis.Worker = undefined;
-    assert.deepEqual(detectQqModes(qq.playbackInfo('DA')), []);
+    assert.deepEqual(detectQqModes(qq.playbackInfo('DAEAC3')), []);
   } finally { Object.assign(globalThis, saved); useJocSettings(null); }
 });
 
 test('download-only QQ entries cannot start audio', async () => {
-  for (const quality of ['NAC', 'DTS', 'DTSX', 'RA360']) {
+  for (const quality of ['NAC', 'DTS', 'DTSX', 'RA360', 'DA', 'DA448', 'DA1500']) {
     const player = playerHarness();
     await player.playQueue([qq.qualityEntry(qq.toTrack(dto), quality)]);
     assert.equal(player.current, null);
     assert.equal(player.audio.src, undefined);
     assert.ok(player.error);
   }
+});
+
+test('AC-4 detail selections and old JOC queue entries remain download-only', async () => {
+  const original = { Worker: globalThis.Worker, AudioContext: globalThis.AudioContext, fetch: globalThis.fetch };
+  globalThis.Worker = function Worker() { assert.fail('AC-4 must not create a decoder'); };
+  globalThis.AudioContext = function AudioContext() { assert.fail('AC-4 must not create a rendering engine'); };
+  globalThis.fetch = async () => assert.fail('AC-4 must not fetch JOC input');
+  try {
+    const track = qq.toTrack(dto);
+    const rows = qq.qualityRows({ qualities: ['DA', 'DA448', 'DA1500'].map((quality) => ({
+      quality, available: true, sizeBytes: 1024, playback: 'joc', codec: 'ec-3', contentType: 'audio/mp4; codecs="ec-3"',
+    })) }, dto.id, () => ['joc2']);
+    for (const row of rows.filter((row) => row.available)) {
+      assert.equal(row.playback, 'download');
+      assert.equal(row.playable, false);
+      assert.ok(row.downloadUrl);
+      assert.equal(row.playUrl, undefined);
+      const detail = playerHarness();
+      await detail.play(qq.qualityItem(track, row.quality, row));
+      assert.equal(detail.current, null);
+      assert.equal(detail.audio.src, undefined);
+      const queued = playerHarness();
+      await queued.playQueue([{ ...qq.entryOf(track), quality: row.quality, playback: 'joc', codec: 'ec-3' }]);
+      assert.equal(queued.current, null);
+      assert.equal(queued.audio.src, undefined);
+    }
+  } finally { Object.assign(globalThis, original); }
 });
 
 test('queue repeats preserve an actual payload override when changing quality', async () => {

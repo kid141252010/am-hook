@@ -2979,6 +2979,9 @@
     }
 
     async tryMode(mode, item, resumeAt, token, paused = false) {
+      if (item.source === 'qq' && isPcmMode(mode) && item.playback !== 'joc') {
+        throw new Error('QQ JOC requires playback=joc');
+      }
       this.teardown();
       if (mode === 'native') {
         this.audio.src = item.streamUrl;

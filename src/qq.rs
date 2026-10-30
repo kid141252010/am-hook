@@ -480,7 +480,12 @@ impl Quality {
             Self::Nac => Codec::Nac,
             Self::Dts => Codec::Dts,
             Self::Dtsx => Codec::Dtsx,
-            Self::Da | Self::Daeac3 | Self::Da448 | Self::Da1500 => Codec::Ec3,
+            // WET (001ATFiY3pb3y6) stsd verification, 2026-10-31:
+            // DA/DA448/DA1500 = ac-4/dac4; DAEAC3 = ec-3/dec3.
+            // QQ's fixed Dolby pipelines determine the codec by tier.
+            // AC-4 has no decoder here; only DAEAC3 uses the E-AC-3 JOC path.
+            Self::Da | Self::Da448 | Self::Da1500 => Codec::Ac4,
+            Self::Daeac3 => Codec::Ec3,
             Self::Ra360 => Codec::Unknown,
         }
     }
@@ -505,6 +510,9 @@ impl Quality {
             Self::Hq => "MP3 320 kbps",
             Self::Rs => "FLAC Hi-Res",
             Self::Ra360 => "360 Reality Audio",
+            Self::Da => "AC-4 Dolby Atmos",
+            Self::Da448 => "AC-4 A-JOC 448 kbps",
+            Self::Da1500 => "AC-4 A-JOC 1500 kbps",
             _ => self.default_codec().format(),
         }
     }
@@ -514,6 +522,7 @@ fn byte_size(value: &Value) -> Option<u64> {
 }
 // These are file-field semantics, not fixed quality-to-field mappings. The
 // positive /url file_size must match before using a field's codec description.
+// size_dolby is shared by AC-4 and E-AC-3 and cannot identify a codec.
 const FILE_FORMATS: &[(&str, &str)] = &[
     ("size_128mp3", "MP3 128 kbps"),
     ("size_320mp3", "MP3 320 kbps"),
@@ -527,7 +536,6 @@ const FILE_FORMATS: &[(&str, &str)] = &[
     ("size_ape", "APE"),
     ("size_hires", "FLAC Hi-Res"),
     ("size_dts", "DTS"),
-    ("size_dolby", "E-AC-3 JOC"),
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -665,7 +673,10 @@ impl Audio {
         let &(field, format) = matching.next()?;
         matching.next().is_none().then_some((field, format))
     }
-    fn codec(&self, quality: Quality, file: &Value) -> Codec {
+    fn codec(&self, quality: Quality) -> Codec {
+        if quality.is_dolby() {
+            return quality.default_codec();
+        }
         if let Some(codec) = self.codec_hint {
             return codec;
         }
@@ -677,15 +688,6 @@ impl Audio {
             .unwrap_or("")
             .to_ascii_lowercase();
         if extension == "mp4" || extension == "m4a" {
-            // All four verified Dolby tiers carry E-AC-3 JOC in MP4.
-            // Explicit codec metadata above takes precedence, including AC-4.
-            if (quality.is_dolby() && extension == "mp4")
-                || self
-                    .matched_field(file)
-                    .is_some_and(|(field, _)| field == "size_dolby")
-            {
-                return Codec::Ec3;
-            }
             if extension == "m4a" {
                 return Codec::Aac;
             }
@@ -694,7 +696,11 @@ impl Audio {
         Codec::from_name(&extension).unwrap_or(Codec::Unknown)
     }
     fn format(&self, quality: Quality, file: &Value) -> &'static str {
-        let codec = self.codec(quality, file);
+        if quality.is_dolby() {
+            // A-JOC bitrates are nominal tier labels, not inferred from size.
+            return quality.format();
+        }
+        let codec = self.codec(quality);
         if let Some((field, format)) = self.matched_field(file) {
             // Size equality cannot turn an AC-4/FLAC URL into a different codec.
             let compatible = match codec {
@@ -703,7 +709,6 @@ impl Audio {
                 Codec::Ogg => field.ends_with("ogg"),
                 Codec::Flac => matches!(field, "size_flac" | "size_hires"),
                 Codec::Ape => field == "size_ape",
-                Codec::Ec3 => field == "size_dolby",
                 Codec::Dts => field == "size_dts",
                 _ => false,
             };
@@ -749,7 +754,7 @@ impl QualityRow {
             audio.map_or(quality.format(), |a| a.format(quality, file)),
         );
         if let Some(audio) = audio {
-            let codec = audio.codec(quality, file);
+            let codec = audio.codec(quality);
             row.playback = quality.playback(codec);
             row.codec = codec.name();
             row.content_type =

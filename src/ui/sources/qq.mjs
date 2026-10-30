@@ -10,20 +10,23 @@ export const QUALITY_IDS = ['MP3128', 'AAC48', 'WEB', 'AAC192', 'OGG96', 'OGG192
 const DEFAULT_CODECS = {
   MP3128: 'mp3', AAC48: 'aac', WEB: 'aac', AAC192: 'aac', OGG96: 'vorbis', OGG192: 'vorbis', HQ: 'mp3', NAC: 'nac',
   SQ: 'flac', RS: 'flac', QAI: 'flac', Q360V1: 'flac', Q360V2: 'flac', RA360: 'unknown', DTS: 'dts', DTSX: 'dtsx',
-  DA: 'ec-3', DAEAC3: 'ec-3', DA448: 'ec-3', DA1500: 'ec-3',
+  DA: 'ac-4', DAEAC3: 'ec-3', DA448: 'ac-4', DA1500: 'ac-4',
 };
 const CONTENT_TYPES = {
   mp3: 'audio/mpeg', aac: 'audio/mp4; codecs="mp4a.40.2"', flac: 'audio/flac', vorbis: 'audio/ogg; codecs="vorbis"',
   opus: 'audio/ogg; codecs="opus"', pcm: 'audio/wav', 'ec-3': 'audio/mp4; codecs="ec-3"',
 };
-/** Actual codec wins over the tier's usual payload; tiers without decoders stay download-only. */
+/** WET stsd: DA/DA448/DA1500 = ac-4/dac4; DAEAC3 = ec-3/dec3 (2026-10-31).
+ * QQ's fixed Dolby pipelines determine those codecs, including for saved queues.
+ * Other tiers use codec metadata; tiers without decoders stay download-only. */
 export function playbackInfo(quality = 'HQ', row = {}) {
   qualityId(quality);
-  const codec = typeof row.codec === 'string' ? row.codec : DEFAULT_CODECS[quality];
+  const dolby = ['DA', 'DA448', 'DA1500', 'DAEAC3'].includes(quality);
+  const codec = !dolby && typeof row.codec === 'string' ? row.codec : DEFAULT_CODECS[quality];
   const playback = ['NAC', 'DTS', 'DTSX', 'RA360'].includes(quality) ? 'download'
     : codec === 'ec-3' ? 'joc' : Object.hasOwn(CONTENT_TYPES, codec) ? 'native' : 'download';
-  return { playback, codec, codecs: codec, contentType: typeof row.contentType === 'string' ? row.contentType
-    : CONTENT_TYPES[codec] || 'application/octet-stream' };
+  return { playback, codec, codecs: codec, contentType: !dolby && typeof row.contentType === 'string' ? row.contentType
+    : CONTENT_TYPES[codec] || (codec === 'ac-4' ? 'audio/mp4; codecs="ac-4"' : 'application/octet-stream') };
 }
 export function qualityId(value = 'HQ') {
   if (!QUALITY_IDS.includes(value)) throw new Error('Invalid QQ quality');
@@ -73,7 +76,7 @@ export function qualityRows(data, id, detect = globalThis.window?.AmHook?.detect
     const sizeBytes = Number.isSafeInteger(row?.sizeBytes) && row.sizeBytes >= 0 ? row.sizeBytes : null;
     const available = row?.available === true && sizeBytes > 0;
     const info = playbackInfo(quality, row);
-    const playable = available && (detect ? detect(info).length > 0 : info.playback !== 'download');
+    const playable = available && info.playback !== 'download' && (!detect || detect(info).length > 0);
     return { quality, available, playable, sizeBytes, ...info, format: typeof row?.format === 'string' ? row.format : '',
       ...(available ? { downloadUrl: downloadUrl(id, quality) } : {}),
       ...(playable ? { playUrl: playUrl(id, quality) } : {}) };

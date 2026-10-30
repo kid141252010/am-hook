@@ -649,31 +649,55 @@ fn basic_aac_and_ogg_tiers_keep_verified_bitrates_and_native_classification() {
 }
 
 #[test]
-fn four_dolby_tiers_use_joc_unless_the_actual_payload_has_another_codec() {
+fn dolby_tiers_follow_verified_wet_sample_entries() {
     let file = json!({"size_dolby":5112212,"size_new":[8936764,29870162]});
-    for (quality, size) in [
-        (Quality::Da, 5112212),
-        (Quality::Daeac3, 5112212),
-        (Quality::Da448, 8936764),
-        (Quality::Da1500, 29870162),
+    for (quality, size, codec, playback, format) in [
+        (
+            Quality::Da,
+            5112212,
+            Codec::Ac4,
+            Playback::Download,
+            "AC-4 Dolby Atmos",
+        ),
+        (
+            Quality::Da448,
+            8936764,
+            Codec::Ac4,
+            Playback::Download,
+            "AC-4 A-JOC 448 kbps",
+        ),
+        (
+            Quality::Da1500,
+            29870162,
+            Codec::Ac4,
+            Playback::Download,
+            "AC-4 A-JOC 1500 kbps",
+        ),
+        (
+            Quality::Daeac3,
+            5112212,
+            Codec::Ec3,
+            Playback::Joc,
+            "E-AC-3 JOC",
+        ),
     ] {
-        let mut source = audio(quality, Some(size), "mp4");
-        let row = QualityRow::from_audio(quality, &file, Some(&source));
-        assert_eq!(row.playback, Playback::Joc, "{quality:?}");
-        assert_eq!(row.codec, "ec-3");
-        assert_eq!(row.format, "E-AC-3 JOC");
-        assert_eq!(row.content_type, "audio/mp4; codecs=\"ec-3\"");
-        assert_eq!(row.size_bytes, Some(size));
-        source.codec_hint = Some(Codec::Ac4);
-        let row = QualityRow::from_audio(quality, &file, Some(&source));
-        assert_eq!(row.playback, Playback::Download);
-        assert_eq!(row.codec, "ac-4");
-        assert_eq!(row.format, "AC-4");
-        let source = audio(quality, Some(size), "ac4");
-        assert_eq!(
-            QualityRow::from_audio(quality, &file, Some(&source)).playback,
-            Playback::Download
-        );
+        let info_row = QualityRow::from_size(quality, Some(size), quality.format());
+        assert_eq!(info_row.playback, playback, "{quality:?}");
+        assert_eq!(info_row.codec, codec.name());
+        assert_eq!(info_row.format, format);
+        assert_eq!(QualityRow::from_audio(quality, &file, None).format, format);
+        // Generic MP4 URLs, shared size_dolby and conflicting metadata cannot
+        // override the fixed pipelines verified by WET's dac4/dec3 boxes.
+        for hint in [None, Some(Codec::Ac4), Some(Codec::Ec3), Some(Codec::Flac)] {
+            let mut source = audio(quality, Some(size), "mp4");
+            source.codec_hint = hint;
+            let row = QualityRow::from_audio(quality, &file, Some(&source));
+            assert_eq!(row.playback, playback, "{quality:?}");
+            assert_eq!(row.codec, codec.name());
+            assert_eq!(row.format, format);
+            assert_eq!(row.content_type, codec.content_type());
+            assert_eq!(row.size_bytes, Some(size));
+        }
     }
 }
 
@@ -779,8 +803,11 @@ fn explicit_codec_metadata_precedes_container_and_size_and_stays_allowlisted() {
             }}]))
             .ok()
             .unwrap();
-            let row =
-                QualityRow::from_audio(Quality::Da, &json!({"size_dolby":5112212}), Some(&source));
+            let row = QualityRow::from_audio(
+                Quality::Q360v1,
+                &json!({"size_dolby":5112212}),
+                Some(&source),
+            );
             assert_eq!(row.codec, codec);
             assert_eq!(row.playback, playback);
         }
@@ -953,10 +980,31 @@ async fn qualities_endpoint_returns_all_tiers_and_uses_shared_cached_probes() {
         ),
         ("DTS", false, None, "DTS", "download", "dts"),
         ("DTSX", false, None, "DTS:X", "download", "dtsx"),
-        ("DA", true, Some(5112212), "E-AC-3 JOC", "joc", "ec-3"),
+        (
+            "DA",
+            true,
+            Some(5112212),
+            "AC-4 Dolby Atmos",
+            "download",
+            "ac-4",
+        ),
         ("DAEAC3", true, Some(5112212), "E-AC-3 JOC", "joc", "ec-3"),
-        ("DA448", true, Some(8936764), "E-AC-3 JOC", "joc", "ec-3"),
-        ("DA1500", true, Some(29870162), "E-AC-3 JOC", "joc", "ec-3"),
+        (
+            "DA448",
+            true,
+            Some(8936764),
+            "AC-4 A-JOC 448 kbps",
+            "download",
+            "ac-4",
+        ),
+        (
+            "DA1500",
+            true,
+            Some(29870162),
+            "AC-4 A-JOC 1500 kbps",
+            "download",
+            "ac-4",
+        ),
     ] {
         let row = rows.iter().find(|row| row["quality"] == quality).unwrap();
         assert_eq!(row["available"], available, "{quality}");
@@ -1009,7 +1057,7 @@ async fn cached_payload_overrides_verified_default_without_cross_tier_leakage() 
             .put(quality.cache_key("abc"), audio(quality, None, "nac"));
     }
     let mut da = audio(Quality::Da, Some(5112212), "mp4");
-    da.codec_hint = Some(Codec::Ac4);
+    da.codec_hint = Some(Codec::Ec3);
     qq.audio.put(Quality::Da.cache_key("abc"), da);
     qq.audio.put(
         Quality::Web.cache_key("abc"),
@@ -1024,7 +1072,7 @@ async fn cached_payload_overrides_verified_default_without_cross_tier_leakage() 
     assert_eq!(row("WEB")["sizeBytes"], 1280);
     assert_eq!(row("WEB")["codec"], "mp3");
     assert_eq!(row("DA")["playback"], "download");
-    assert_eq!(row("DA")["format"], "AC-4");
+    assert_eq!(row("DA")["format"], "AC-4 Dolby Atmos");
     assert_eq!(row("DAEAC3")["playback"], "joc");
     assert_eq!(row("DAEAC3")["sizeBytes"], 5112212);
 }

@@ -22,10 +22,12 @@
 | 空间 | RA360 | 360 Reality Audio | 360 Reality Audio | `size_360ra` 数组；两个样本均为 0 | download |
 | 空间 | DTS | DTS 5.1 | DTS 5.1 | `size_dts`；两个样本均为 0 | download |
 | 空间 | DTSX | DTS:X | DTS:X | info 字段待定，逐档探测；两个样本均为 0 | download |
-| 杜比 | DA | 杜比全景声 | Dolby Atmos | `size_dolby`，`.mp4` E-AC-3 JOC | joc |
-| 杜比 | DAEAC3 | 杜比 EAC3 | Dolby EAC3 | 与 DA / `size_dolby` 同大小，`.mp4` E-AC-3 JOC | joc |
-| 杜比 | DA448 | 杜比 AJOC 448 | Dolby AJOC 448 | `size_new` 的一槽，`.mp4` E-AC-3 JOC；槽索引未固定 | joc |
-| 杜比 | DA1500 | 杜比 AJOC 1500 | Dolby AJOC 1500 | `size_new` 的一槽，`.mp4` E-AC-3 JOC；槽索引未固定 | joc |
+| 杜比 | DA | 杜比全景声 | Dolby Atmos | `size_dolby`，`.mp4` AC-4 Dolby Atmos（`ac-4` / `dac4`） | download |
+| 杜比 | DAEAC3 | 杜比 EAC3 | Dolby EAC3 | 与 DA / `size_dolby` 同大小，`.mp4` E-AC-3 JOC（`ec-3` / `dec3`） | joc |
+| 杜比 | DA448 | 杜比 AJOC 448 | Dolby AJOC 448 | `size_new` 的一槽，`.mp4` AC-4 A-JOC 448 kbps（`ac-4` / `dac4`）；槽索引未固定 | download |
+| 杜比 | DA1500 | 杜比 AJOC 1500 | Dolby AJOC 1500 | `size_new` 的一槽，`.mp4` AC-4 A-JOC 1500 kbps（`ac-4` / `dac4`）；槽索引未固定 | download |
+
+2026-10-31 分类修正依据：监工已逐一下载 J.Y. Park《WET》`001ATFiY3pb3y6` 的四档杜比文件，检查 MP4 样本描述盒 `stsd` 的 sample entry / 配置子盒标记。DA、DA448、DA1500 均为 `ac-4` / `dac4`（DA1500 在头部 2 MB 内确认）；DAEAC3 为 `ec-3` / `dec3`，才是真 E-AC-3。此前将四档一律记作 E-AC-3 JOC 的结论作废。A-JOC 属于 AC-4，448 / 1500 kbps 来自档位名义码率。QQ 编码管线固定，以上四档按档位确定性映射编码与分类，不凭 `.mp4`、相等大小或通用 codec 元数据把 DA 系改判为 E-AC-3；本轮不重复线上探测。
 
 任务给出的大小证据：
 
@@ -45,7 +47,7 @@
 
 `GET /qq/song/:mid/qualities` 始终按上表顺序返回 20 行，字段为 `quality`、`available`、`sizeBytes`、`format`、`playback`、`codec`、`contentType`，不包含音频直链。一次 info 的 `track_info.file` 服务全部档位，并与歌曲详情共享缓存。已验证字段优先用于大小与可用性；未知槽位及未知字段的档位逐码探测 `/extra/music/url`。只接受正数大小，0 或缺失不生成可用操作。
 
-链接和探测结果共用 `(mid, quality)` 缓存，TTL 300 秒；命中的正数探测结果用于核对实际大小、载荷和格式，不会让另一档复用链接。`size_new` 不写死槽索引。格式的码率说明只有在探测大小与对应 info 字段唯一相等、且实际编码相容时采用；大小相等不能把 AC-4 改判为 FLAC 或 E-AC-3。
+链接和探测结果共用 `(mid, quality)` 缓存，TTL 300 秒；命中的正数探测结果用于核对实际大小、载荷和格式，不会让另一档复用链接。`size_new` 不写死槽索引。非杜比档的格式码率说明只有在探测大小与对应 info 字段唯一相等、且实际编码相容时采用；杜比档采用上述已实测的固定管线与名义码率。DA 与 DAEAC3 共用 `size_dolby` 大小，不能由该字段推断编码；大小相等也不能把 AC-4 改判为 FLAC 或 E-AC-3。
 
 播放与下载使用严格大写的 `?quality=` 白名单；省略时保持 HQ，无效代码在上游请求前返回 400。下载后缀及 MIME 按实际文件取值，未知载荷为 `application/octet-stream`。
 
@@ -53,11 +55,22 @@
 
 `native` 用于 MP3、AAC/M4A、Ogg、FLAC 等可由浏览器解码的载荷，前端再结合 `canPlayType` 检测实际能力。QAI、Q360V1/V2 的多声道 FLAC 交给浏览器解码下混；若实际载荷不同，则按探测编码分类。NAC、DTS、DTSX、RA360 与 AC-4 等无解码器载荷为 `download`，沿用 Apple 不可播变体的「仅下载」提示与禁用播放风格。
 
-四个杜比档的已验证 MP4 / E-AC-3 JOC 走 `joc`；实际探测为 AC-4 等不支持编码时仅下载。播放器通过同源 `/qq/song/:mid/download?quality=<档>` 读取字节，`qq-joc-input.mjs` 的 `openQqJocTrack` 解出 MP4（或裸 E-AC-3）的音频样本，封装为既有 Worker 接受的分段，再由 `JocLiveEngine` → `joc-decode-worker.js` → 既有 EC-3 解码与 JOC 渲染器 → AudioWorklet/PCM 输出。QQ 字节不经过 Apple 解密或密钥接口。杜比继续使用已有 Speaker 2.0 / 双耳渲染和声场控制。
+按用户 2026-10-31「先实测、不行就放弃浏览器内解析」的定案，DA、DA448、DA1500 的 AC-4 载荷只提供下载，不做浏览器内解析播放。本应用没有 AC-4 解码器，既有 JOC 管线只解 E-AC-3 JOC；详情页的三档不显示播放按钮，队列选档也不进入 `qq-joc-input` / `JocLiveEngine`。JOC 入口只接受 `playback=joc`，四档杜比中仅 DAEAC3 符合。
+
+DAEAC3 通过同源 `/qq/song/:mid/download?quality=DAEAC3` 读取字节，`qq-joc-input.mjs` 的 `openQqJocTrack` 解出 MP4（或裸 E-AC-3）的音频样本，封装为既有 Worker 接受的分段，再由 `JocLiveEngine` → `joc-decode-worker.js` → 既有 EC-3 解码与 JOC 渲染器 → AudioWorklet/PCM 输出。QQ 字节不经过 Apple 解密或密钥接口。DAEAC3 继续使用已有 Speaker 2.0 / 双耳渲染和声场控制。
 
 `/qq-song/:mid` 展示全部音质和中英标签、格式、大小及可用性。默认播放 HQ；详情页切换当前歌曲档位保留剩余队列与播放进度，重复播放及源切换恢复保持所选档位，向未激活的 QQ 队列添加歌曲不打断 Apple。歌词仍按 AMLL → TTML → QRC → LRC 降级，保留翻译与来源。
 
-## 本轮离线验证
+## 本轮 AC-4 分类修正的离线验证（2026-10-31）
+
+- `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**67 项通过，0 失败，仅过滤指定的 3 个 wrapper 测试**。
+- `node --test --test-isolation=none tests/qq_source.mjs tests/qq_joc_input.mjs tests/player_modes.cjs`：**35 项通过，0 失败**。四档期望值按 DA / DA448 / DA1500 / DAEAC3 顺序为 `download/download/download/joc`；验证固定编码与格式、旧队列的 `ec-3` 元数据、详情选档仅下载、AC-4 不取 JOC 输入也不创建渲染引擎，以及 DAEAC3 经实际 `AmPlayer.tryMode` / `JocLiveEngine` 入口的 E-AC-3 渲染衔接。
+- `cargo clippy --offline -p am-hook --all-targets -- -D warnings`：通过，无 warning。
+- 修改过的 JS/MJS 语法检查、`git diff --check` 及修改过的 Rust 文件格式检查通过。stable 未安装 rustfmt，使用已安装的 `nightly-2026-08-20` rustfmt 完成格式检查。
+
+以上为离线回归验证；四档真实文件的 `stsd` 盒标记结论来自本轮用户提供的监工实测，没有重新下载或将离线 E-AC-3 fixture 当作 AC-4 解码成功的证据。
+
+## 前轮完整档表的离线验证记录（分类修正前）
 
 - `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**67 项通过，0 失败，仅过滤这 3 个 wrapper 端口测试**，其他 wrapper 单测照常运行。
 - `node --test --test-isolation=none tests/qq_source.mjs tests/qq_joc_input.mjs tests/player_modes.cjs`：**33 项通过，0 失败**。覆盖完整 20 档、AAC/Ogg、杜比四档与 AC-4 覆盖、浏览器能力检测、选档队列、同源限制、取消以及实际 `JocEngine.load` / `AmPlayer.tryMode` 入口。

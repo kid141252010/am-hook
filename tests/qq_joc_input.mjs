@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { qqJocTrack, openQqJocTrack } from '../src/ui/qq-joc-input.mjs';
+import * as qq from '../src/ui/sources/qq.mjs';
 const { AmPlayer, JocEngine, JocLiveEngine } = createRequire(import.meta.url)('../src/ui/player.js');
 const fixture = new Uint8Array(fs.readFileSync(new URL('../crates/joc-core/tests/fixtures/joc_fixture.eac3', import.meta.url)));
 const worker = fs.readFileSync(new URL('../src/ui/joc-decode-worker.js', import.meta.url), 'utf8');
@@ -54,27 +55,25 @@ test('JOC parser rejects AC-4, invalid sample ranges, truncated frames and unsup
   assert.throws(() => qqJocTrack(new Uint8Array([0, 0, 0, 1])), /truncated/);
 });
 
-test('QQ opener accepts every Dolby download route, forwards cancellation and rejects external URLs before fetching', async () => {
+test('QQ opener accepts the DAEAC3 download route, forwards cancellation and rejects external URLs before fetching', async () => {
   const original = globalThis.fetch;
   const controller = new AbortController();
   const calls = [];
   globalThis.fetch = async (url, options) => { calls.push({ url, options }); return { ok: true, arrayBuffer: async () => mp4().buffer }; };
   try {
-    for (const quality of ['DA', 'DAEAC3', 'DA448', 'DA1500']) {
-      const url = `/qq/song/WET/download?quality=${quality}`;
-      assert.ok((await openQqJocTrack(url, controller.signal)).duration > 0);
-      assert.equal(calls.at(-1).url, url);
-      assert.equal(calls.at(-1).options.signal, controller.signal);
-      assert.equal(calls.at(-1).options.credentials, 'same-origin');
-      assert.equal(calls.at(-1).options.redirect, 'error');
-    }
+    const url = '/qq/song/WET/download?quality=DAEAC3';
+    assert.ok((await openQqJocTrack(url, controller.signal)).duration > 0);
+    assert.equal(calls.at(-1).url, url);
+    assert.equal(calls.at(-1).options.signal, controller.signal);
+    assert.equal(calls.at(-1).options.credentials, 'same-origin');
+    assert.equal(calls.at(-1).options.redirect, 'error');
     const count = calls.length;
     for (const url of ['https://qq.com/file.mp4', '//qq.com/file.mp4', '/qq/song/WET/play?quality=DA', '/qq/song/WET/download?quality=da', '/qq/song/WET/download?quality=DA&url=https://qq.com']) {
       await assert.rejects(openQqJocTrack(url), /local QQ download/);
     }
     assert.equal(calls.length, count);
     controller.abort();
-    await assert.rejects(openQqJocTrack('/qq/song/WET/download?quality=DA', controller.signal), { name: 'AbortError' });
+    await assert.rejects(openQqJocTrack('/qq/song/WET/download?quality=DAEAC3', controller.signal), { name: 'AbortError' });
     assert.equal(calls.length, count);
   } finally { globalThis.fetch = original; }
 });
@@ -85,7 +84,7 @@ test('an abort while the download body arrives prevents parsing and a segment lo
   globalThis.fetch = async () => ({ ok: true, arrayBuffer: () => new Promise((resolve) => { finish = resolve; }) });
   try {
     const controller = new AbortController();
-    const pending = openQqJocTrack('/qq/song/WET/download?quality=DA448', controller.signal);
+    const pending = openQqJocTrack('/qq/song/WET/download?quality=DAEAC3', controller.signal);
     await Promise.resolve();
     controller.abort(); finish(mp4().buffer);
     await assert.rejects(pending, { name: 'AbortError' });
@@ -112,8 +111,8 @@ test('JocEngine.load injects QQ input into the existing renderer, and destructio
     openDecoder: async () => {}, pump: async () => {} });
   try {
     let signal;
-    await engine.load('/qq/song/WET/download?quality=DA', async (url, inputSignal) => {
-      assert.equal(url, '/qq/song/WET/download?quality=DA'); signal = inputSignal; return qqJocTrack(mp4());
+    await engine.load('/qq/song/WET/download?quality=DAEAC3', async (url, inputSignal) => {
+      assert.equal(url, '/qq/song/WET/download?quality=DAEAC3'); signal = inputSignal; return qqJocTrack(mp4());
     });
     assert.ok(Math.abs(engine.duration - packets.length * 1536 / 48000) < 1e-10);
     assert.ok(engine.decoder);
@@ -153,7 +152,7 @@ test('AmPlayer.tryMode feeds the selected QQ download through JocLiveEngine and 
   const player = Object.create(AmPlayer.prototype);
   Object.assign(player, { playToken: 7, current: {}, spatial: {}, audio: { volume: 0.4 }, teardown() {}, emitSpatial() {} });
   try {
-    const item = { source: 'qq', track: 'WET', quality: 'DA1500', downloadUrl: '/qq/song/WET/download?quality=DA1500' };
+    const item = qq.qualityItem(qq.toTrack({ id: 'WET' }), 'DAEAC3');
     await player.tryMode('joc2', item, 0.25, 7, true);
     assert.ok(player.pcm instanceof JocLiveEngine);
     assert.deepEqual(calls, [item.downloadUrl]);
@@ -170,5 +169,17 @@ test('AmPlayer.tryMode feeds the selected QQ download through JocLiveEngine and 
     JocLiveEngine.prototype.openDecoder = original.open; JocLiveEngine.prototype.pump = original.pump;
     // seek was inherited; remove the temporary override.
     delete JocLiveEngine.prototype.seek;
+  }
+});
+
+test('QQ PCM entry rejects download and native classifications before opening input or creating JocLiveEngine', async () => {
+  const player = Object.create(AmPlayer.prototype);
+  player.teardown = () => assert.fail('unsupported input must be rejected before teardown or engine creation');
+  for (const quality of ['DA', 'DA448', 'DA1500', 'HQ']) {
+    const item = qq.qualityItem(qq.toTrack({ id: 'WET' }), quality);
+    for (const mode of ['joc2', 'jocbin', 'ec3']) {
+      await assert.rejects(player.tryMode(mode, item, 0, 1), /requires playback=joc/);
+      assert.equal(player.pcm, undefined);
+    }
   }
 });
