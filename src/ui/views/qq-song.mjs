@@ -3,6 +3,7 @@ import { trackKey } from '../sources/track.mjs';
 import { artUrl } from '../library.mjs';
 import { parseTTML } from '../lyrics/ttml.mjs';
 import { createDetailHeader } from './detail-header.mjs';
+import { prefs } from '../prefs.mjs';
 
 export const bodyClass = 'song-page qq-song-page';
 export const styles = ['/assets/views/song.css', '/assets/views/qq-song.css'];
@@ -25,6 +26,8 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
   const header = createDetailHeader({ $, signal, artUrl, rerender: () => renderHeader() });
   const active = (quality) => !!track && trackKey(player.current) === track.key && player.current?.quality === quality;
   const playing = () => !!player.current && !player.transport().paused;
+  const defaultQuality = () => qq.pickDefaultQuality(rows, prefs.get('playback').quality);
+  const currentTrack = () => !!track && trackKey(player.current) === track.key;
 
   function renderFavorite() {
     const saved = track && qq.isFavorite(track);
@@ -56,8 +59,8 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
   }
 
   function syncPlaying() {
-    $('play-best').disabled = !track || !rows.find((row) => row.quality === 'HQ')?.playable;
-    $('play-best').textContent = t(active('HQ') && playing() ? 'song.pause' : 'song.play');
+    $('play-best').disabled = !track || (!currentTrack() && !defaultQuality());
+    $('play-best').textContent = t(currentTrack() && playing() ? 'song.pause' : 'song.play');
     for (const node of $('variant-list').children) {
       const current = active(node.dataset.quality);
       node.classList.toggle('playing', current);
@@ -114,7 +117,11 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
     $('alert').hidden = !errorKey;
     $('alert').textContent = errorKey ? t(errorKey) : '';
   }
-  $('play-best').addEventListener('click', () => playQuality('HQ'));
+  $('play-best').addEventListener('click', () => {
+    if (currentTrack()) { player.toggle(); return; }
+    const row = defaultQuality();
+    if (row) playQuality(row.quality);
+  });
   $('favorite').addEventListener('click', () => {
     if (!track) return;
     try { qq.toggleFavorite(track); } catch { toast(t('qq.storageFailed')); }
@@ -126,6 +133,7 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
   });
   player.onChange(syncPlaying);
   signal.addEventListener('abort', qq.onFavoritesChange(renderFavorite), { once: true });
+  signal.addEventListener('abort', prefs.onChange((section) => { if (section === 'playback') syncPlaying(); }), { once: true });
   onLangChange(render);
   render();
 

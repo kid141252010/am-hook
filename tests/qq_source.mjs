@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import * as qq from '../src/ui/sources/qq.mjs';
 import { sourceOf, trackKey, withIdentity } from '../src/ui/sources/track.mjs';
 import { artUrl } from '../src/ui/library.mjs';
-const { AmPlayer, trackKey: playerKey, detectQqModes, useJocSettings } = createRequire(import.meta.url)('../src/ui/player.js');
+const { AmPlayer, trackKey: playerKey, detectQqModes, useJocSettings, usePlaybackSettings } = createRequire(import.meta.url)('../src/ui/player.js');
 beforeEach(() => qq.setCurrentQuality('HQ'));
 
 const dto = {
@@ -222,6 +222,119 @@ test('QQ plays the local 302 route through native audio without asking Apple for
   assert.equal(player.queue.entries[0].artwork, player.current.artwork);
   assert.equal(player.audio.src, `/qq/song/${dto.id}/play?quality=HQ`);
   assert.equal(player.audio.paused, false);
+});
+
+test('QQ lazily resolves defaults per track; changing the setting preserves current and manual quality', async () => {
+  const original = globalThis.fetch;
+  let preference = 'hires';
+  const calls = [];
+  usePlaybackSettings({ get: () => ({ quality: preference }) });
+  globalThis.fetch = async (path) => {
+    calls.push(path);
+    return { ok: true, json: async () => ({ qualities: ['RS', 'SQ', 'HQ', 'WEB'].map((quality) => ({ quality, available: true, sizeBytes: 100 })) }) };
+  };
+  try {
+    const player = playerHarness();
+    const track = qq.toTrack(dto);
+    await player.playQueue([qq.entryOf(track), qq.entryOf(qq.toTrack({ id: 'next' }))]);
+    assert.equal(player.current.quality, 'RS');
+    preference = 'high';
+    assert.equal(player.current.quality, 'RS');
+    await player.play(qq.qualityItem(track, 'SQ'));
+    await player.playAt(0);
+    assert.equal(player.current.quality, 'SQ');
+    assert.equal(calls.length, 1);
+    await player.playAt(1);
+    assert.equal(player.current.quality, 'HQ');
+    assert.equal(calls.length, 2);
+  } finally { globalThis.fetch = original; usePlaybackSettings(null); }
+});
+
+test('QQ lookup failure retains HQ, but a successful empty qualities response does not invent a playable tier', async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => { throw new Error('offline'); };
+    const player = playerHarness();
+    await player.playQueue([qq.entryOf(qq.toTrack(dto))]);
+    assert.equal(player.current.quality, 'HQ');
+    assert.equal(player.audio.src, qq.playUrl(dto.id, 'HQ'));
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ qualities: [] }) });
+    const empty = playerHarness();
+    await empty.playQueue([qq.entryOf(qq.toTrack(dto))]);
+    assert.equal(empty.current, null);
+    assert.equal(typeof empty.error, 'function');
+  } finally { globalThis.fetch = original; }
+});
+
+test('a manual QQ selection during the qualities lookup cannot be replaced or paused by the pending default', async () => {
+  const original = globalThis.fetch;
+  let finish;
+  let requested;
+  const requestStarted = new Promise((resolve) => { requested = resolve; });
+  globalThis.fetch = () => new Promise((resolve) => { finish = resolve; requested(); });
+  try {
+    const player = playerHarness();
+    const track = qq.toTrack(dto);
+    const pending = player.playQueue([qq.entryOf(track)]);
+    await requestStarted;
+    await player.play(qq.qualityItem(track, 'HQ'));
+    finish({ ok: true, json: async () => ({ qualities: [{ quality: 'RS', available: true, sizeBytes: 100 }] }) });
+    await pending;
+    assert.equal(player.current.quality, 'HQ');
+    assert.equal(player.audio.paused, false);
+    assert.equal(player.pendingKey, null);
+    assert.equal(player.queue.entries[0].quality, 'HQ');
+  } finally { globalThis.fetch = original; }
+});
+
+test('Apple defaults use existing capability filtering, respect preference with JOC enabled, and leave manual playback intact', async () => {
+  const saved = { wrapper: globalThis.AmWrapper, decrypt: globalThis.AmDecrypt, media: globalThis.MediaSource, worker: globalThis.Worker };
+  const variants = [
+    { group_id: 'audio-alac-stereo-96000-24', codecs: 'alac', sample_rate: 96000, bandwidth: 4000000 },
+    { group_id: 'audio-alac-stereo-48000-24', codecs: 'alac', sample_rate: 48000, bandwidth: 2000000 },
+    { group_id: 'audio-atmos-2768', codecs: 'ec-3', bandwidth: 768000 },
+    { group_id: 'audio-stereo-256', codecs: 'mp4a.40.2', bandwidth: 256000 },
+  ];
+  let preference = 'hires';
+  globalThis.AmWrapper = { songMaster: async () => ({ variants }) };
+  globalThis.AmDecrypt = { supported: () => true };
+  globalThis.MediaSource = { isTypeSupported: () => true };
+  usePlaybackSettings({ get: () => ({ quality: preference }) });
+  useJocSettings({ get: () => ({ mode: 'speaker' }) });
+  try {
+    const player = playerHarness();
+    player.start = async (item) => { player.current = item; };
+    await player.playQueue([{ track: '123', name: 'Apple song' }]);
+    assert.equal(player.current.variant, variants[0]);
+    preference = 'lossless';
+    assert.equal(player.current.variant, variants[0]);
+    await player.playQueue([{ track: '123', name: 'Apple song' }]);
+    assert.equal(player.current.variant, variants[1]);
+    preference = 'dolby';
+    await player.playQueue([{ track: '123', name: 'Apple song' }]);
+    assert.equal(player.current.variant, variants[2]);
+    // EC-3 has neither MSE nor PCM; the filtered candidates fall back to AAC.
+    globalThis.MediaSource = { isTypeSupported: (mime) => mime.includes('mp4a') };
+    globalThis.Worker = undefined;
+    await player.playQueue([{ track: '123', name: 'Apple song' }]);
+    assert.equal(player.current.variant, variants[3]);
+    const previous = player.current;
+    globalThis.AmDecrypt = { supported: () => false };
+    await player.playQueue([{ track: '123', name: 'Apple song' }]);
+    assert.equal(player.current, previous);
+    assert.equal(typeof player.error, 'function');
+    const manual = { track: '123', id: '123:manual', variant: variants[0], codecs: 'alac' };
+    await player.play(manual);
+    assert.equal(player.current.variant, variants[0]);
+  } finally {
+    globalThis.AmWrapper = saved.wrapper;
+    globalThis.AmDecrypt = saved.decrypt;
+    globalThis.MediaSource = saved.media;
+    globalThis.Worker = saved.worker;
+    usePlaybackSettings(null);
+    useJocSettings(null);
+  }
+>>>>>>> fccc172 (feat(settings): share default streaming quality across QQ and Apple)
 });
 
 test('every native QQ quality reaches the play URL and matching playback label', async () => {

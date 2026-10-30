@@ -7,6 +7,8 @@ import { createActions, openMenu, copyText, targetOf, pagePath, artistLinks, alb
 import { compareAlac, pickAlac } from '../alac-check.mjs';
 import { createDetailHeader } from './detail-header.mjs';
 import { downloads } from '../downloads.mjs';
+import { prefs } from '../prefs.mjs';
+import { pickAppleVariant } from '../playback-quality.mjs';
 
 const { detectMode, qualityBadge, qualityIcon, formatTime } = window.AmHook;
 const { AmDecrypt, AmI18n, AmWrapper } = window;
@@ -234,10 +236,10 @@ export function mount({ root, url, signal, player, navigate, onLangChange, toast
     else player.play(playItem(v));
   }
 
-  /** 头部「播放」：正在播放这首歌时暂停 / 继续，否则播放浏览器能播放的最高音质 */
+  /** 头部「播放」：正在播放这首歌时暂停 / 继续，否则按在线播放偏好选初始档 */
   function playBest() {
     if (player.current && trackKey(player.current) === trackKey({ id: adamId })) { player.toggle(); return; }
-    const best = variants.find((v) => v.mode);
+    const best = pickAppleVariant(variants.filter((v) => v.mode), prefs.get('playback').quality);
     if (best) player.play(playItem(best));
   }
 

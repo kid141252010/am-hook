@@ -60,6 +60,11 @@
   function useJocSettings(store) { jocStore = store; }
   function jocSettings() { return jocStore ? jocStore.get() : JOC_OFF; }
 
+  // Initial quality only, following the existing per-track variant lifecycle.
+  let playbackStore = null;
+  function usePlaybackSettings(store) { playbackStore = store; }
+  function playbackQuality() { return playbackStore?.get().quality || 'hires'; }
+
   function isEc3(codecs) { return /^(ec-3|ec3)$/i.test(String(codecs)); }
   /** JOC 的两种输出：joc2 = Speaker 2.0，jocbin = 双耳 */
   function isJocMode(mode) { return mode === 'joc2' || mode === 'jocbin'; }
@@ -106,6 +111,8 @@
     ? import('./sources/qq.mjs') : import('/assets/sources/qq.mjs');
   const loadQqJocInput = () => typeof module !== 'undefined' && module.exports
     ? import('./qq-joc-input.mjs') : import('/assets/qq-joc-input.mjs');
+  const loadPlaybackQuality = () => typeof module !== 'undefined' && module.exports
+    ? import('./playback-quality.mjs') : import('/assets/playback-quality.mjs');
 
   function detectMode(codecs) {
     return detectModes(codecs)[0] || null;
@@ -356,15 +363,33 @@
   const withIdentity = (item) => ({ ...item, source: sourceOf(item), key: trackKey(item) });
 
   async function resolveEntry(entry) {
+    const preference = playbackQuality();
     if (entry.source === 'qq') {
       if (!/^[0-9A-Za-z]{1,32}$/.test(entry.track)) throw new Error('Invalid QQ ID');
       const qq = await loadQq();
-      const quality = entry.quality ?? qq.currentQuality;
-      return { ...entry, ...qq.variantItem(entry.track, qq.qualityVariant(quality, entry)), source: 'qq', key: trackKey(entry),
+      let quality = entry.quality;
+      let row = entry;
+      if (quality === undefined) {
+        // No explicit tier: resolve the shared default-quality setting against
+        // this song's playable rows (lazily fetched). A failed lookup retains
+        // the shared current-quality startup behavior (HQ unless the settings
+        // layer initialized it), without caching it as a manual choice.
+        let rows;
+        try { rows = await qq.qualities(entry.track); } catch { /* use currentQuality on lookup failure */ }
+        if (rows) {
+          row = qq.pickDefaultQuality(rows, preference);
+          if (!row) throw Object.assign(new Error(t('album.noPlayable', { name: entry.name })), { noPlayable: true });
+          quality = row.quality;
+        } else {
+          quality = qq.currentQuality;
+        }
+      }
+      return { ...entry, ...qq.variantItem(entry.track, qq.qualityVariant(quality, row)), source: 'qq', key: trackKey(entry),
         href: `/qq-song/${entry.track}`, title: entry.name };
     }
     const { variants } = await global.AmWrapper.songMaster(entry.track);
-    const best = sortVariants(variants).find((v) => detectMode(v.codecs));
+    const { pickAppleVariant } = await loadPlaybackQuality();
+    const best = pickAppleVariant(sortVariants(variants).filter((v) => detectMode(v.codecs)), preference);
     if (!best) throw Object.assign(new Error(t('album.noPlayable', { name: entry.name })), { noPlayable: true });
     return {
       ...variantItem(entry.track, best),
@@ -2732,6 +2757,12 @@
     async play(item) {
       item = withIdentity(item);
       this.switchSource(item.source, false);
+      // A manual selection wins even if this track's default is still loading.
+      // Use the existing queue resolution guard so it cannot replace/toggle it.
+      if (this.pendingKey === trackKey(item)) {
+        this.queueSerial++;
+        this.pendingTrack = this.pendingKey = null;
+      }
       // 单独播放另一首歌时结束队列；同一首歌切换音质时保留
       if (this.queue && trackKey(item) !== trackKey(this.queue.entries[this.queue.pos])) this.clearQueue();
       return this.start(item);
@@ -3235,7 +3266,7 @@
     }
   }
 
-  const api = { AmPlayer, Marquee, artistNodes, qualityBadge, qualityIcon, segmentAt, formatTime, detectMode, detectModes, detectQqModes, mimeFor, useJocSettings, trackKey, sourceOf };
+  const api = { AmPlayer, Marquee, artistNodes, qualityBadge, qualityIcon, segmentAt, formatTime, detectMode, detectModes, detectQqModes, mimeFor, useJocSettings, usePlaybackSettings, trackKey, sourceOf };
   if (typeof module !== 'undefined' && module.exports) module.exports = { ...api, MseEngine, JocEngine, JocLiveEngine, sortVariants };
   else global.AmHook = api;
 })(typeof window !== 'undefined' ? window : globalThis);

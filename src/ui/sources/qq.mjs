@@ -1,5 +1,6 @@
 // API requests use the local adapter; artwork uses public QQ CDN URLs from its DTOs.
 import { trackKey, withIdentity } from './track.mjs';
+import { playbackQualityChain } from '../playback-quality.mjs';
 export { trackKey } from './track.mjs';
 const MID = /^[0-9A-Za-z]{1,32}$/;
 export const enabled = () => globalThis.window?.AM_HOOK_HOST?.qqEnabled === true;
@@ -104,6 +105,18 @@ export function qualityRows(data, id, detect = globalThis.window?.AmHook?.detect
 }
 export async function qualities(id, signal) {
   return qualityRows(await request(`/qq/song/${mid(id)}/qualities`, signal), id);
+}
+const DEFAULT_QUALITY = { hires: 'RS', lossless: 'SQ', dolby: 'DAEAC3', high: 'HQ', standard: 'WEB' };
+/** Pure: normalized /qualities rows + preference → row | null.
+ * Only mapped, available native/JOC tiers qualify; respect capability filtering
+ * when qualityRows supplied playable. Never override an explicit user choice. */
+export function pickDefaultQuality(rows, preference = 'hires') {
+  for (const choice of playbackQualityChain(preference)) {
+    const row = rows.find((v) => v.quality === DEFAULT_QUALITY[choice] && v.available === true
+      && ['native', 'joc'].includes(v.playback) && v.playable !== false);
+    if (row) return row;
+  }
+  return null;
 }
 /** The detail page and full-screen lyrics share the parsed lyric model. */
 export function lyricLines(result) {

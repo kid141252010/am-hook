@@ -13,7 +13,7 @@ import { openMenu, createActions, nowPlayingTarget, songTarget } from '/assets/v
 import { mountDownloadCenter } from '/assets/download-center.mjs';
 import { prefs } from '/assets/prefs.mjs';
 
-const { AmPlayer, useJocSettings } = window.AmHook;
+const { AmPlayer, useJocSettings, usePlaybackSettings } = window.AmHook;
 const { AmI18n, AmWrapper } = window;
 const { t } = AmI18n;
 AmI18n.apply();
@@ -99,6 +99,7 @@ function toast(message) {
 
 // JOC 对象渲染的设置（设置中心与音质详情共用 prefs.mjs 的 'joc' 分组）：先接上再创建播放器，改动（含其他标签页）立即生效
 useJocSettings({ get: () => prefs.get('joc'), set: (patch) => prefs.set('joc', patch) });
+usePlaybackSettings({ get: () => prefs.get('playback') });
 const player = new AmPlayer($('player'));
 prefs.onChange((section) => { if (section === 'joc') player.jocChanged(); });
 // 供调试与测试使用

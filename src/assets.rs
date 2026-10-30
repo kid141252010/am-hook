@@ -65,6 +65,7 @@ pub static ASSETS: &[Asset] = &[
     asset!("/assets/download-center.mjs", JS, "download-center.mjs"),
     asset!("/assets/downloads.css", CSS, "downloads.css"),
     asset!("/assets/prefs.mjs", JS, "prefs.mjs"),
+    asset!("/assets/playback-quality.mjs", JS, "playback-quality.mjs"),
     asset!("/assets/mp4-tags.mjs", JS, "mp4-tags.mjs"),
     asset!("/assets/zip.mjs", JS, "zip.mjs"),
     asset!("/assets/naming.mjs", JS, "naming.mjs"),

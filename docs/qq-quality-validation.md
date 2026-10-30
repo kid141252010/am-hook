@@ -59,7 +59,39 @@
 
 DAEAC3 通过同源 `/qq/song/:mid/download?quality=DAEAC3` 读取字节，`qq-joc-input.mjs` 的 `openQqJocTrack` 解出 MP4（或裸 E-AC-3）的音频样本，封装为既有 Worker 接受的分段，再由 `JocLiveEngine` → `joc-decode-worker.js` → 既有 EC-3 解码与 JOC 渲染器 → AudioWorklet/PCM 输出。QQ 字节不经过 Apple 解密或密钥接口。DAEAC3 继续使用已有 Speaker 2.0 / 双耳渲染和声场控制。
 
-`/qq-song/:mid` 展示全部音质和中英标签、格式、大小及可用性。默认播放 HQ；详情页切换当前歌曲档位保留剩余队列与播放进度，重复播放及源切换恢复保持所选档位，向未激活的 QQ 队列添加歌曲不打断 Apple。歌词仍按 AMLL → TTML → QRC → LRC 降级，保留翻译与来源。
+`/qq-song/:mid` 展示全部音质和中英标签、格式、大小及可用性。默认播放档位由下述「在线播放默认音质」决定；详情页切换当前歌曲档位保留剩余队列与播放进度，重复播放及源切换恢复保持所选档位，向未激活的 QQ 队列添加歌曲不打断 Apple。歌词仍按 AMLL → TTML → QRC → LRC 降级，保留翻译与来源。
+
+## 在线播放默认音质（T3，2026-10-31）
+
+设置中心新增「在线播放默认音质 / Default streaming quality」，QQ 与 Apple Music 共用一个值。沿用 `prefs.mjs` 的 `am-hook:settings` localStorage 记录，存于 `playback.quality`；取值为 `hires / lossless / dolby / high / standard`，默认 `hires`。旧记录缺少该分组或值无效时恢复 Hi-Res，修改与其他标签页的 storage 事件沿用现有同步机制。
+
+| 设置（中文 / English） | QQ 档位 | Apple 可播 variant 类别 |
+| --- | --- | --- |
+| Hi-Res / Hi-Res | RS | Hi-Res Lossless；ALAC 采样率 > 48 kHz，与既有音质标分类边界一致 |
+| 无损 / Lossless | SQ | Lossless；其余 ALAC |
+| 杜比 / Dolby | DAEAC3 | Atmos / EAC3-JOC（`ec-3`） |
+| 极高 / Very High | HQ | 高码率 AAC（通常 256 kbps；> 128 kbps） |
+| 标准 / Standard | WEB | AAC ≤ 128 kbps / HE-AAC |
+
+从所选档开始逐级向下找候选：`Hi-Res → 无损 → 杜比 → 极高 → 标准`。QQ 对应严格的 `RS → SQ → DAEAC3 → HQ → WEB`，Hi-Res 缺失先退 SQ；只选 `available === true` 且 `playback ∈ {native, joc}` 的行，若归一化行标记 `playable === false`（浏览器能力不支持）也跳过。AC-4 的 DA / DA448 / DA1500、其他仅下载档及阶梯外档位不参加默认选择；所选档及以下均无候选时返回 null，由入口显示无可播音质，完整手动档表仍保留。
+
+QQ 队列采用侵入较小的「播放前懒取」方案：`resolveEntry` 对没有明确 `quality` 的条目先取 `/qq/song/:mid/qualities`，再按偏好选档并生成带 `?quality=` 的播放链接。请求失败时保留原 HQ 起播兼容行为；成功返回空表时不假定 HQ 可用。已有明确档位的队列条目直接使用该档位，不额外取 qualities。QQ 详情页的头部播放按钮使用已加载的候选和同一纯函数。
+
+Apple 在既有 `variants + detectMode` 可播过滤及 best 排序后选择，类别从 `codecs / badge / label` 和现有 `group_id / sample_rate / bandwidth` 元数据识别，同类取最高带宽。阶梯未选出时仍取传入 best 列表首项兜底，空列表返回 null。队列和歌曲详情页头部播放按钮共用该函数；JOC 开关继续控制渲染方式，初始档位遵循共享音质偏好。
+
+两个供集成调用的纯函数（不读 prefs、不修改输入）：
+
+- `src/ui/sources/qq.mjs`：`pickDefaultQuality(rows, preference = 'hires') → row | null`。`rows` 是 `qualityRows` / `qualities` 返回的归一化候选；T2 构建条目可使用返回行的 `quality`、`codec`、`contentType`、`playback`。
+- `src/ui/playback-quality.mjs`：`pickAppleVariant(variants, preference = 'hires') → variant | null`。`variants` 由调用方沿现有 best 顺序排列并过滤可播项。
+
+设置只影响每首曲的初始选档，沿 Apple 现有变体解析、预取、重播与恢复生命周期使用；修改设置不会触发当前曲切档。面板 / 详情页手动选档仍走现有 `player.play` 与切档机制，QQ 队列继续保存手选档位。手选发生在默认档查询尚未完成时，使用既有 `queueSerial` 机制使该次默认解析失效，避免晚到的结果覆盖手选或将其暂停。两源详情页的头部播放按钮在当前曲已加载时只暂停 / 继续，避免覆盖手动档位。本任务未接播放器音质标（T2 范围）。
+
+T3 离线验证：
+
+- `node --test --test-isolation=none tests/playback_quality.mjs tests/qq_source.mjs tests/qq_joc_input.mjs tests/player_modes.cjs tests/download_core.mjs`：**57 项通过，0 失败**。覆盖两源每个偏好及完整回退链、Hi-Res → SQ、仅下载 / AC-4 / 浏览器能力排除、Apple 元数据分类和 best 兜底、旧设置默认值与校验 / 存储 / 跨标签页同步、队列懒取、查询失败兼容、查询未完成时手选优先和设置不打断当前曲。相同文件以普通 `node --test` 运行也全部通过。
+- `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**67 项通过，0 失败，仅跳过指定的 3 个 wrapper 测试**。
+- `cargo clippy --offline -p am-hook --all-targets -- -D warnings`：通过，无 warning。
+- 新增纯函数测试已加入 GitHub Actions。`node scripts/build-static.mjs target/t3-static --cloudflare`：**211 个资源生成成功**，新模块登记在 `src/assets.rs`，可参与内容哈希与资源引用改写；修改的 JS/MJS 语法检查与 `git diff --check` 通过。
 
 ## T2：播放器音质标与质量面板接入（2026-10-31）
 
