@@ -132,10 +132,12 @@ impl Qq {
     pub fn new(base: &str, amll: &str, proxy: Option<&str>) -> Result<Self, String> {
         let proxy = outbound_proxy(proxy)?;
         let mut api = reqwest::Client::builder()
+            .http1_only()
             .user_agent("am-hook")
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15));
         let mut media = reqwest::Client::builder()
+            .http1_only()
             .user_agent("am-hook")
             .connect_timeout(Duration::from_secs(5))
             .read_timeout(Duration::from_secs(30))
@@ -456,10 +458,10 @@ async fn download(
         .get(url.clone())
         .send()
         .await
-        .map_err(network)?
-        .error_for_status()
         .map_err(network)?;
-    if !response.status().is_success() {
+    let status = response.status();
+    if !status.is_success() {
+        tracing::warn!("qq download upstream status: {status}");
         return Err(unavailable());
     }
     let mut out = Response::builder()
