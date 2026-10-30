@@ -322,8 +322,19 @@ impl Qq {
         let file = &track_info(mid, &data)["file"];
         let qualities =
             futures::future::join_all(QUALITY_LIST.into_iter().map(|quality| async move {
-                if let Some(field) = quality.size_field() {
-                    QualityRow::from_size(quality, byte_size(&file[field]), quality.format())
+                if !quality.needs_probe(file) {
+                    // Verified info mappings avoid unnecessary URL requests. Cached
+                    // probes still describe the actual payload when it differs.
+                    match self.audio.get(&quality.cache_key(mid)) {
+                        Some(audio) if audio.size_bytes.is_some() => {
+                            QualityRow::from_audio(quality, file, Some(&audio))
+                        }
+                        _ => QualityRow::from_size(
+                            quality,
+                            quality.info_size(file),
+                            quality.format(),
+                        ),
+                    }
                 } else {
                     // Unmapped tiers are probed separately, through the same short-lived
                     // (mid, quality) cache used by playback and download.
@@ -346,61 +357,162 @@ fn track_info<'a>(mid: &str, data: &'a Value) -> &'a Value {
         .unwrap_or_else(|| data.get("data").unwrap_or(data));
     raw.get("track_info").unwrap_or(raw)
 }
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 enum Quality {
-    Hq,
-    Sq,
+    Mp3128,
+    Aac48,
     Web,
+    Aac192,
+    Ogg96,
+    Ogg192,
+    Hq,
     Nac,
+    Sq,
     Rs,
+    Qai,
+    Q360v1,
+    Q360v2,
+    Ra360,
+    Dts,
+    Dtsx,
+    Da,
+    Daeac3,
+    Da448,
+    Da1500,
 }
-const QUALITY_LIST: [Quality; 5] = [
-    Quality::Hq,
-    Quality::Sq,
+// The supplied 19+ tier table contains twenty distinct, verified API codes.
+const QUALITY_LIST: [Quality; 20] = [
+    Quality::Mp3128,
+    Quality::Aac48,
     Quality::Web,
+    Quality::Aac192,
+    Quality::Ogg96,
+    Quality::Ogg192,
+    Quality::Hq,
     Quality::Nac,
+    Quality::Sq,
     Quality::Rs,
+    Quality::Qai,
+    Quality::Q360v1,
+    Quality::Q360v2,
+    Quality::Ra360,
+    Quality::Dts,
+    Quality::Dtsx,
+    Quality::Da,
+    Quality::Daeac3,
+    Quality::Da448,
+    Quality::Da1500,
 ];
 impl Quality {
     fn name(self) -> &'static str {
         match self {
-            Self::Hq => "HQ",
-            Self::Sq => "SQ",
+            Self::Mp3128 => "MP3128",
+            Self::Aac48 => "AAC48",
             Self::Web => "WEB",
+            Self::Aac192 => "AAC192",
+            Self::Ogg96 => "OGG96",
+            Self::Ogg192 => "OGG192",
+            Self::Hq => "HQ",
             Self::Nac => "NAC",
+            Self::Sq => "SQ",
             Self::Rs => "RS",
+            Self::Qai => "QAI",
+            Self::Q360v1 => "Q360V1",
+            Self::Q360v2 => "Q360V2",
+            Self::Ra360 => "RA360",
+            Self::Dts => "DTS",
+            Self::Dtsx => "DTSX",
+            Self::Da => "DA",
+            Self::Daeac3 => "DAEAC3",
+            Self::Da448 => "DA448",
+            Self::Da1500 => "DA1500",
         }
     }
     fn cache_key(self, mid: &str) -> String {
         format!("{mid}:{}", self.name())
     }
     fn size_field(self) -> Option<&'static str> {
-        // HQ was cross-checked with /extra/music/url: file_size = 10,792,943,
-        // exactly track_info.file.size_320mp3 for 0039MnYb0qxYhV (320 kbps MP3).
-        // SQ -> size_flac and RS -> size_hires are semantic candidates only;
-        // WEB is ambiguous and NAC has no dedicated field. Network verification
-        // of these four tiers was blocked, so do not freeze guessed mappings:
-        // their cached URL probes compare file_size with the file fields below.
+        // Verified against /extra/music/url, not inferred from display names.
+        // size_new slot indices and the DTSX field remain deliberately unmapped.
         match self {
+            Self::Mp3128 => Some("size_128mp3"),
+            Self::Aac48 => Some("size_48aac"),
+            Self::Web => Some("size_96aac"),
+            Self::Aac192 => Some("size_192aac"),
+            Self::Ogg96 => Some("size_96ogg"),
+            Self::Ogg192 => Some("size_192ogg"),
             Self::Hq => Some("size_320mp3"),
+            Self::Sq => Some("size_flac"),
+            Self::Rs => Some("size_hires"),
+            Self::Ra360 => Some("size_360ra"),
+            Self::Dts => Some("size_dts"),
+            Self::Da | Self::Daeac3 => Some("size_dolby"),
             _ => None,
+        }
+    }
+    fn info_size(self, file: &Value) -> Option<u64> {
+        let value = file.get(self.size_field()?)?;
+        if self == Self::Ra360 {
+            // The array can describe multiple encodings. Only an unambiguous
+            // positive size can identify a row without a separate URL probe.
+            let mut sizes = value.as_array()?.iter().filter_map(byte_size);
+            let size = sizes.next()?;
+            sizes.all(|other| other == size).then_some(size)
+        } else {
+            byte_size(value)
+        }
+    }
+    fn needs_probe(self, file: &Value) -> bool {
+        self.size_field().is_none()
+            || (self == Self::Ra360
+                && self.info_size(file).is_none()
+                && file["size_360ra"]
+                    .as_array()
+                    .is_some_and(|sizes| sizes.iter().any(|size| byte_size(size).is_some())))
+    }
+    fn default_codec(self) -> Codec {
+        match self {
+            Self::Mp3128 | Self::Hq => Codec::Mp3,
+            Self::Aac48 | Self::Web | Self::Aac192 => Codec::Aac,
+            Self::Ogg96 | Self::Ogg192 => Codec::Ogg,
+            Self::Sq | Self::Rs | Self::Qai | Self::Q360v1 | Self::Q360v2 => Codec::Flac,
+            Self::Nac => Codec::Nac,
+            Self::Dts => Codec::Dts,
+            Self::Dtsx => Codec::Dtsx,
+            Self::Da | Self::Daeac3 | Self::Da448 | Self::Da1500 => Codec::Ec3,
+            Self::Ra360 => Codec::Unknown,
+        }
+    }
+    fn is_dolby(self) -> bool {
+        matches!(self, Self::Da | Self::Daeac3 | Self::Da448 | Self::Da1500)
+    }
+    fn playback(self, codec: Codec) -> Playback {
+        if matches!(self, Self::Nac | Self::Dts | Self::Dtsx | Self::Ra360) {
+            Playback::Download
+        } else {
+            codec.playback()
         }
     }
     fn format(self) -> &'static str {
         match self {
+            Self::Mp3128 => "MP3 128 kbps",
+            Self::Aac48 => "AAC 48 kbps",
+            Self::Web => "AAC 96 kbps",
+            Self::Aac192 => "AAC 192 kbps",
+            Self::Ogg96 => "Ogg 96 kbps",
+            Self::Ogg192 => "Ogg 192 kbps",
             Self::Hq => "MP3 320 kbps",
-            Self::Sq => "Lossless",
-            Self::Web => "Web audio",
-            Self::Nac => "AICodec",
-            Self::Rs => "Hi-Res",
+            Self::Rs => "FLAC Hi-Res",
+            Self::Ra360 => "360 Reality Audio",
+            _ => self.default_codec().format(),
         }
     }
 }
 fn byte_size(value: &Value) -> Option<u64> {
     value.as_u64().filter(|size| *size > 0)
 }
-// These are file-field semantics, not guessed quality-to-field mappings. A
+// These are file-field semantics, not fixed quality-to-field mappings. The
 // positive /url file_size must match before using a field's codec description.
 const FILE_FORMATS: &[(&str, &str)] = &[
     ("size_128mp3", "MP3 128 kbps"),
@@ -414,11 +526,121 @@ const FILE_FORMATS: &[(&str, &str)] = &[
     ("size_flac", "FLAC"),
     ("size_ape", "APE"),
     ("size_hires", "FLAC Hi-Res"),
+    ("size_dts", "DTS"),
+    ("size_dolby", "E-AC-3 JOC"),
 ];
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Playback {
+    Native,
+    Joc,
+    Download,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Codec {
+    Mp3,
+    Aac,
+    Flac,
+    Ogg,
+    Opus,
+    Wav,
+    Ape,
+    Ec3,
+    Ac3,
+    Ac4,
+    Dts,
+    Dtsx,
+    Nac,
+    Unknown,
+}
+impl Codec {
+    fn from_name(value: &str) -> Option<Self> {
+        Some(match value.to_ascii_lowercase().as_str() {
+            "mp3" => Self::Mp3,
+            "aac" | "mp4a.40.2" => Self::Aac,
+            "flac" => Self::Flac,
+            "ogg" | "vorbis" => Self::Ogg,
+            "opus" => Self::Opus,
+            "wav" | "pcm" => Self::Wav,
+            "ape" => Self::Ape,
+            "ec-3" | "ec3" | "eac3" | "e-ac-3" | "eac3-joc" | "joc" => Self::Ec3,
+            "ac-3" | "ac3" => Self::Ac3,
+            "ac-4" | "ac4" => Self::Ac4,
+            "dts" | "dtsc" => Self::Dts,
+            "dtsx" | "dts:x" | "dtsx.0" => Self::Dtsx,
+            "nac" | "aicodec" => Self::Nac,
+            _ => return None,
+        })
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Aac => "aac",
+            Self::Flac => "flac",
+            Self::Ogg => "vorbis",
+            Self::Opus => "opus",
+            Self::Wav => "pcm",
+            Self::Ape => "ape",
+            Self::Ec3 => "ec-3",
+            Self::Ac3 => "ac-3",
+            Self::Ac4 => "ac-4",
+            Self::Dts => "dts",
+            Self::Dtsx => "dtsx",
+            Self::Nac => "nac",
+            Self::Unknown => "unknown",
+        }
+    }
+    fn format(self) -> &'static str {
+        match self {
+            Self::Mp3 => "MP3",
+            Self::Aac => "AAC",
+            Self::Flac => "FLAC",
+            Self::Ogg => "Ogg",
+            Self::Opus => "Opus",
+            Self::Wav => "PCM WAV",
+            Self::Ape => "APE",
+            Self::Ec3 => "E-AC-3 JOC",
+            Self::Ac3 => "AC-3",
+            Self::Ac4 => "AC-4",
+            Self::Dts => "DTS",
+            Self::Dtsx => "DTS:X",
+            Self::Nac => "AICodec",
+            Self::Unknown => "Unknown",
+        }
+    }
+    fn playback(self) -> Playback {
+        match self {
+            Self::Mp3 | Self::Aac | Self::Flac | Self::Ogg | Self::Opus | Self::Wav => {
+                Playback::Native
+            }
+            Self::Ec3 => Playback::Joc,
+            _ => Playback::Download,
+        }
+    }
+    fn content_type(self) -> &'static str {
+        match self {
+            Self::Mp3 => "audio/mpeg",
+            Self::Aac => "audio/mp4; codecs=\"mp4a.40.2\"",
+            Self::Flac => "audio/flac",
+            Self::Ogg => "audio/ogg; codecs=\"vorbis\"",
+            Self::Opus => "audio/ogg; codecs=\"opus\"",
+            Self::Wav => "audio/wav",
+            Self::Ape => "audio/x-ape",
+            Self::Ec3 => "audio/mp4; codecs=\"ec-3\"",
+            Self::Ac3 => "audio/mp4; codecs=\"ac-3\"",
+            Self::Ac4 => "audio/mp4; codecs=\"ac-4\"",
+            Self::Dts => "audio/vnd.dts",
+            Self::Dtsx => "audio/vnd.dts.hd; codecs=\"dtsx\"",
+            Self::Nac => "audio/x-nac",
+            Self::Unknown => "application/octet-stream",
+        }
+    }
+}
 #[derive(Clone)]
 struct Audio {
     url: reqwest::Url,
     size_bytes: Option<u64>,
+    codec_hint: Option<Codec>,
 }
 impl Audio {
     fn from_response(data: &Value) -> ApiResult<Self> {
@@ -429,34 +651,69 @@ impl Audio {
                 .and_then(cdn_url)
                 .ok_or_else(unavailable)?,
             size_bytes: byte_size(&track["file_size"]),
+            // Only allowlisted codec metadata enters DTOs; never pass upstream text through.
+            codec_hint: ["codec", "codecs", "audio_codec"]
+                .iter()
+                .find_map(|key| track[*key].as_str().and_then(Codec::from_name)),
         })
     }
-    fn format(&self, quality: Quality, file: &Value) -> &'static str {
-        let mut matching = FILE_FORMATS.iter().filter(|(field, _)| {
-            self.size_bytes.is_some() && byte_size(&file[*field]) == self.size_bytes
-        });
-        if let Some((_, format)) = matching.next() {
-            if matching.next().is_none() {
-                return format;
-            }
+    fn matched_field(&self, file: &Value) -> Option<(&'static str, &'static str)> {
+        let size = self.size_bytes?;
+        let mut matching = FILE_FORMATS
+            .iter()
+            .filter(|(field, _)| byte_size(&file[*field]) == Some(size));
+        let &(field, format) = matching.next()?;
+        matching.next().is_none().then_some((field, format))
+    }
+    fn codec(&self, quality: Quality, file: &Value) -> Codec {
+        if let Some(codec) = self.codec_hint {
+            return codec;
         }
-        // No unique field match: identify only the extension we actually got.
-        match self
+        let extension = self
             .url
             .path()
             .rsplit('.')
             .next()
             .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "mp3" => "MP3",
-            "m4a" | "aac" => "AAC",
-            "flac" => "FLAC",
-            "ape" => "APE",
-            "ogg" => "Ogg",
-            _ => quality.format(),
+            .to_ascii_lowercase();
+        if extension == "mp4" || extension == "m4a" {
+            // All four verified Dolby tiers carry E-AC-3 JOC in MP4.
+            // Explicit codec metadata above takes precedence, including AC-4.
+            if (quality.is_dolby() && extension == "mp4")
+                || self
+                    .matched_field(file)
+                    .is_some_and(|(field, _)| field == "size_dolby")
+            {
+                return Codec::Ec3;
+            }
+            if extension == "m4a" {
+                return Codec::Aac;
+            }
+            return Codec::Unknown;
         }
+        Codec::from_name(&extension).unwrap_or(Codec::Unknown)
+    }
+    fn format(&self, quality: Quality, file: &Value) -> &'static str {
+        let codec = self.codec(quality, file);
+        if let Some((field, format)) = self.matched_field(file) {
+            // Size equality cannot turn an AC-4/FLAC URL into a different codec.
+            let compatible = match codec {
+                Codec::Mp3 => field.ends_with("mp3"),
+                Codec::Aac => field.ends_with("aac"),
+                Codec::Ogg => field.ends_with("ogg"),
+                Codec::Flac => matches!(field, "size_flac" | "size_hires"),
+                Codec::Ape => field == "size_ape",
+                Codec::Ec3 => field == "size_dolby",
+                Codec::Dts => field == "size_dts",
+                _ => false,
+            };
+            if compatible {
+                return format;
+            }
+        }
+        // size_new has no verified per-slot codec semantics: even when its size
+        // matches (NAC/Q360/QAI), describe the actual extension/codec only.
+        codec.format()
     }
 }
 #[derive(Serialize)]
@@ -466,24 +723,43 @@ struct QualityRow {
     available: bool,
     size_bytes: Option<u64>,
     format: &'static str,
+    playback: Playback,
+    codec: &'static str,
+    content_type: &'static str,
 }
 impl QualityRow {
     fn from_size(quality: Quality, size_bytes: Option<u64>, format: &'static str) -> Self {
         let size_bytes = size_bytes.filter(|size| *size > 0);
+        let codec = quality.default_codec();
         Self {
             quality,
             available: size_bytes.is_some(),
             size_bytes,
             format,
+            playback: quality.playback(codec),
+            codec: codec.name(),
+            content_type: codec.content_type(),
         }
     }
     fn from_audio(quality: Quality, file: &Value, audio: Option<&Audio>) -> Self {
         let audio = audio.filter(|audio| audio.size_bytes.is_some());
-        Self::from_size(
+        let mut row = Self::from_size(
             quality,
             audio.and_then(|a| a.size_bytes),
             audio.map_or(quality.format(), |a| a.format(quality, file)),
-        )
+        );
+        if let Some(audio) = audio {
+            let codec = audio.codec(quality, file);
+            row.playback = quality.playback(codec);
+            row.codec = codec.name();
+            row.content_type =
+                if codec == Codec::Aac && audio.url.path().to_ascii_lowercase().ends_with(".aac") {
+                    "audio/aac"
+                } else {
+                    codec.content_type()
+                };
+        }
+        row
     }
 }
 #[derive(Serialize)]
@@ -659,10 +935,16 @@ fn download_content_type(url: &reqwest::Url) -> &'static str {
     {
         "mp3" => "audio/mpeg",
         "flac" => "audio/flac",
-        "m4a" => "audio/mp4",
+        "m4a" | "mp4" => "audio/mp4",
         "aac" => "audio/aac",
-        "ogg" => "audio/ogg",
+        "ogg" | "opus" => "audio/ogg",
+        "wav" => "audio/wav",
         "ape" => "audio/x-ape",
+        "eac3" | "ec3" | "joc" => "audio/eac3",
+        "ac3" => "audio/ac3",
+        "ac4" => "audio/ac4",
+        "dts" => "audio/vnd.dts",
+        "dtsx" => "audio/vnd.dts.hd",
         _ => "application/octet-stream",
     }
 }

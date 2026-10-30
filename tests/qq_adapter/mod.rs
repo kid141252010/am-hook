@@ -357,7 +357,7 @@ async fn proxy_is_not_exposed_in_capabilities_or_host_config() {
         if path == "/qq/capabilities" {
             assert_eq!(
                 serde_json::from_str::<Value>(&body).unwrap(),
-                json!({"enabled":true,"qualities":["HQ", "SQ", "WEB", "NAC", "RS"]})
+                json!({"enabled":true,"qualities":["MP3128", "AAC48", "WEB", "AAC192", "OGG96", "OGG192", "HQ", "NAC", "SQ", "RS", "QAI", "Q360V1", "Q360V2", "RA360", "DTS", "DTSX", "DA", "DAEAC3", "DA448", "DA1500"]})
             );
         }
     }
@@ -496,14 +496,39 @@ fn audio(quality: Quality, size: Option<u64>, extension: &str) -> Audio {
         ))
         .unwrap(),
         size_bytes: size,
+        codec_hint: None,
     }
 }
 
 #[test]
 fn quality_sizes_use_only_positive_bytes_and_verified_mapping() {
-    assert_eq!(Quality::Hq.size_field(), Some("size_320mp3"));
-    for quality in [Quality::Sq, Quality::Web, Quality::Nac, Quality::Rs] {
-        // Do not silently promote semantic guesses to verified mappings.
+    for (quality, field) in [
+        (Quality::Mp3128, "size_128mp3"),
+        (Quality::Aac48, "size_48aac"),
+        (Quality::Web, "size_96aac"),
+        (Quality::Aac192, "size_192aac"),
+        (Quality::Ogg96, "size_96ogg"),
+        (Quality::Ogg192, "size_192ogg"),
+        (Quality::Hq, "size_320mp3"),
+        (Quality::Sq, "size_flac"),
+        (Quality::Rs, "size_hires"),
+        (Quality::Dts, "size_dts"),
+        (Quality::Da, "size_dolby"),
+        (Quality::Daeac3, "size_dolby"),
+        (Quality::Ra360, "size_360ra"),
+    ] {
+        assert_eq!(quality.size_field(), Some(field));
+    }
+    for quality in [
+        Quality::Nac,
+        Quality::Qai,
+        Quality::Q360v1,
+        Quality::Q360v2,
+        Quality::Dtsx,
+        Quality::Da448,
+        Quality::Da1500,
+    ] {
+        // No unverified size_new slot indices or DTSX field names.
         assert!(quality.size_field().is_none());
     }
     for value in [Value::Null, json!(0), json!(-1), json!(1.5), json!("123")] {
@@ -519,6 +544,164 @@ fn quality_sizes_use_only_positive_bytes_and_verified_mapping() {
     assert!(row.available);
     assert_eq!(row.size_bytes, Some(10792943));
     assert_eq!(row.format, "MP3 320 kbps");
+    for (value, expected) in [
+        (json!([0, 0, 0]), None),
+        (json!([0, 123, 0]), Some(123)),
+        (json!([123, 123]), Some(123)),
+        (json!([123, 456]), None),
+        (Value::Null, None),
+    ] {
+        let file = json!({"size_360ra":value});
+        assert_eq!(Quality::Ra360.info_size(&file), expected);
+        assert_eq!(
+            Quality::Ra360.needs_probe(&file),
+            value == json!([123, 456])
+        );
+    }
+}
+
+#[test]
+fn quality_whitelist_roundtrips_every_verified_code_in_group_order() {
+    let expected = [
+        "MP3128", "AAC48", "WEB", "AAC192", "OGG96", "OGG192", "HQ", "NAC", "SQ", "RS", "QAI",
+        "Q360V1", "Q360V2", "RA360", "DTS", "DTSX", "DA", "DAEAC3", "DA448", "DA1500",
+    ];
+    assert_eq!(QUALITY_LIST.len(), expected.len());
+    for (quality, name) in QUALITY_LIST.into_iter().zip(expected) {
+        assert_eq!(quality.name(), name);
+        assert_eq!(serde_json::to_value(quality).unwrap(), json!(name));
+        assert_eq!(
+            serde_json::from_value::<Quality>(json!(name)).unwrap(),
+            quality
+        );
+        assert!(serde_json::from_value::<Quality>(json!(name.to_ascii_lowercase())).is_err());
+    }
+    for unknown in ["Q360V3", "Q360_5.1", "Q360_7.1.4", "Q360_3.0", "DA2000"] {
+        assert!(serde_json::from_value::<Quality>(json!(unknown)).is_err());
+    }
+}
+
+#[test]
+fn basic_aac_and_ogg_tiers_keep_verified_bitrates_and_native_classification() {
+    let file = json!({"size_128mp3":1280,"size_48aac":480,"size_96aac":960,
+        "size_192aac":1920,"size_96ogg":961,"size_192ogg":1921});
+    for (quality, size, extension, format, codec, content_type) in [
+        (
+            Quality::Mp3128,
+            1280,
+            "mp3",
+            "MP3 128 kbps",
+            "mp3",
+            "audio/mpeg",
+        ),
+        (
+            Quality::Aac48,
+            480,
+            "m4a",
+            "AAC 48 kbps",
+            "aac",
+            "audio/mp4; codecs=\"mp4a.40.2\"",
+        ),
+        (
+            Quality::Web,
+            960,
+            "m4a",
+            "AAC 96 kbps",
+            "aac",
+            "audio/mp4; codecs=\"mp4a.40.2\"",
+        ),
+        (
+            Quality::Aac192,
+            1920,
+            "AAC",
+            "AAC 192 kbps",
+            "aac",
+            "audio/aac",
+        ),
+        (
+            Quality::Ogg96,
+            961,
+            "ogg",
+            "Ogg 96 kbps",
+            "vorbis",
+            "audio/ogg; codecs=\"vorbis\"",
+        ),
+        (
+            Quality::Ogg192,
+            1921,
+            "ogg",
+            "Ogg 192 kbps",
+            "vorbis",
+            "audio/ogg; codecs=\"vorbis\"",
+        ),
+    ] {
+        let source = audio(quality, Some(size), extension);
+        let row = QualityRow::from_audio(quality, &file, Some(&source));
+        assert_eq!(row.playback, Playback::Native, "{quality:?}");
+        assert_eq!(row.codec, codec);
+        assert_eq!(row.format, format);
+        assert_eq!(row.content_type, content_type);
+        let info_row = QualityRow::from_size(quality, quality.info_size(&file), quality.format());
+        assert_eq!(info_row.size_bytes, Some(size));
+        assert_eq!(info_row.playback, Playback::Native);
+        assert_eq!(info_row.format, format);
+    }
+}
+
+#[test]
+fn four_dolby_tiers_use_joc_unless_the_actual_payload_has_another_codec() {
+    let file = json!({"size_dolby":5112212,"size_new":[8936764,29870162]});
+    for (quality, size) in [
+        (Quality::Da, 5112212),
+        (Quality::Daeac3, 5112212),
+        (Quality::Da448, 8936764),
+        (Quality::Da1500, 29870162),
+    ] {
+        let mut source = audio(quality, Some(size), "mp4");
+        let row = QualityRow::from_audio(quality, &file, Some(&source));
+        assert_eq!(row.playback, Playback::Joc, "{quality:?}");
+        assert_eq!(row.codec, "ec-3");
+        assert_eq!(row.format, "E-AC-3 JOC");
+        assert_eq!(row.content_type, "audio/mp4; codecs=\"ec-3\"");
+        assert_eq!(row.size_bytes, Some(size));
+        source.codec_hint = Some(Codec::Ac4);
+        let row = QualityRow::from_audio(quality, &file, Some(&source));
+        assert_eq!(row.playback, Playback::Download);
+        assert_eq!(row.codec, "ac-4");
+        assert_eq!(row.format, "AC-4");
+        let source = audio(quality, Some(size), "ac4");
+        assert_eq!(
+            QualityRow::from_audio(quality, &file, Some(&source)).playback,
+            Playback::Download
+        );
+    }
+}
+
+#[test]
+fn spatial_flac_is_native_and_undecodable_tiers_remain_download_only() {
+    for quality in [Quality::Qai, Quality::Q360v1, Quality::Q360v2] {
+        for (extension, expected) in [
+            ("flac", Playback::Native),
+            ("ac4", Playback::Download),
+            ("dts", Playback::Download),
+            ("mp4", Playback::Download),
+        ] {
+            let source = audio(quality, Some(123), extension);
+            assert_eq!(
+                QualityRow::from_audio(quality, &json!({"size_new":[123]}), Some(&source)).playback,
+                expected
+            );
+        }
+    }
+    for quality in [Quality::Nac, Quality::Dts, Quality::Dtsx, Quality::Ra360] {
+        for extension in ["nac", "dts", "dtsx", "mp4", "ac4", "flac", "mp3"] {
+            let source = audio(quality, Some(123), extension);
+            assert_eq!(
+                QualityRow::from_audio(quality, &Value::Null, Some(&source)).playback,
+                Playback::Download
+            );
+        }
+    }
 }
 
 #[test]
@@ -539,7 +722,7 @@ fn probe_sizes_cross_check_file_fields_before_describing_the_format() {
         assert_eq!(row.size_bytes, Some(size));
         assert_eq!(row.format, expected);
     }
-    // WEB is deliberately not assumed to be AAC: a MP3-sized result describes MP3.
+    // A verified default cannot override an actual MP3 payload returned for WEB.
     let source = audio(Quality::Web, Some(4317292), "mp3");
     assert_eq!(source.format(Quality::Web, &file), "MP3 128 kbps");
     // Equal-size fields are ambiguous: only the actual extension is described.
@@ -579,6 +762,39 @@ fn audio_response_requires_a_public_qq_url_and_treats_missing_sizes_as_unavailab
     ] {
         assert!(Audio::from_response(&data).is_err());
     }
+}
+
+#[test]
+fn explicit_codec_metadata_precedes_container_and_size_and_stays_allowlisted() {
+    for key in ["codec", "codecs", "audio_codec"] {
+        for (name, codec, playback) in [
+            ("ac4", "ac-4", Playback::Download),
+            ("ac-4", "ac-4", Playback::Download),
+            ("eac3", "ec-3", Playback::Joc),
+            ("flac", "flac", Playback::Native),
+        ] {
+            let source = Audio::from_response(&json!([{"track_info":{
+                "file_url":"https://isure.stream.qqmusic.qq.com/DA.mp4?vkey=private",
+                "file_size":5112212, key:name
+            }}]))
+            .ok()
+            .unwrap();
+            let row =
+                QualityRow::from_audio(Quality::Da, &json!({"size_dolby":5112212}), Some(&source));
+            assert_eq!(row.codec, codec);
+            assert_eq!(row.playback, playback);
+        }
+    }
+    let source = Audio::from_response(&json!([{"track_info":{
+        "file_url":"https://isure.stream.qqmusic.qq.com/file.bin?vkey=private",
+        "file_size":123, "codec":"private upstream metadata"
+    }}]))
+    .ok()
+    .unwrap();
+    let row = QualityRow::from_audio(Quality::Q360v1, &Value::Null, Some(&source));
+    assert_eq!(row.playback, Playback::Download);
+    assert_eq!(row.codec, "unknown");
+    assert!(!serde_json::to_string(&row).unwrap().contains("private"));
 }
 
 #[test]
@@ -647,40 +863,114 @@ async fn qualities_endpoint_returns_all_tiers_and_uses_shared_cached_probes() {
     qq.infos.put(
         "abc".into(),
         json!({"abc":{"track_info":{"mid":"abc","file":{
-            "size_320mp3":10792943,"size_flac":55397039,"size_192aac":6519764,"size_hires":0
+            "size_128mp3":4317292,"size_48aac":1600000,"size_96aac":3259882,
+            "size_192aac":6519764,"size_96ogg":3200000,"size_192ogg":6400000,
+            "size_320mp3":10792943,"size_flac":55397039,"size_hires":0,
+            "size_dts":0,"size_360ra":[0,0,0],"size_dolby":5112212,
+            "size_new":[58805051,80437198,186980254,8936764,29870162]
         }}}}),
     );
     for (quality, size, extension) in [
-        (Quality::Sq, Some(55397039), "flac"),
-        (Quality::Web, Some(6519764), "m4a"),
+        (Quality::Web, Some(3259882), "m4a"),
         (Quality::Nac, None, "nac"),
-        (Quality::Rs, None, "flac"),
+        (Quality::Q360v1, Some(58805051), "flac"),
+        (Quality::Q360v2, Some(80437198), "flac"),
+        (Quality::Qai, Some(186980254), "flac"),
+        (Quality::Dtsx, None, "dtsx"),
+        (Quality::Da448, Some(8936764), "mp4"),
+        (Quality::Da1500, Some(29870162), "mp4"),
     ] {
         qq.audio
             .put(quality.cache_key("abc"), audio(quality, size, extension));
     }
-    // HQ is fully derived from info and must not require a cached or live audio URL.
+    // Verified fields work without a cached or live audio URL.
     assert!(qq.audio.get(&Quality::Hq.cache_key("abc")).is_none());
+    assert!(qq.audio.get(&Quality::Da.cache_key("abc")).is_none());
     let response = get(state.clone(), "/qq/song/abc/qualities").await;
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let rows = body["qualities"].as_array().unwrap();
+    assert_eq!(rows.len(), 20);
     assert_eq!(
-        body,
-        json!({"qualities":[
-            {"quality":"HQ","available":true,"sizeBytes":10792943,"format":"MP3 320 kbps"},
-            {"quality":"SQ","available":true,"sizeBytes":55397039,"format":"FLAC"},
-            {"quality":"WEB","available":true,"sizeBytes":6519764,"format":"AAC 192 kbps"},
-            {"quality":"NAC","available":false,"sizeBytes":null,"format":"AICodec"},
-            {"quality":"RS","available":false,"sizeBytes":null,"format":"Hi-Res"}
-        ]})
+        rows.iter()
+            .map(|row| row["quality"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "MP3128", "AAC48", "WEB", "AAC192", "OGG96", "OGG192", "HQ", "NAC", "SQ", "RS", "QAI",
+            "Q360V1", "Q360V2", "RA360", "DTS", "DTSX", "DA", "DAEAC3", "DA448", "DA1500"
+        ]
     );
+    for (quality, available, size, format, playback, codec) in [
+        (
+            "MP3128",
+            true,
+            Some(4317292),
+            "MP3 128 kbps",
+            "native",
+            "mp3",
+        ),
+        ("AAC48", true, Some(1600000), "AAC 48 kbps", "native", "aac"),
+        ("WEB", true, Some(3259882), "AAC 96 kbps", "native", "aac"),
+        (
+            "AAC192",
+            true,
+            Some(6519764),
+            "AAC 192 kbps",
+            "native",
+            "aac",
+        ),
+        (
+            "OGG96",
+            true,
+            Some(3200000),
+            "Ogg 96 kbps",
+            "native",
+            "vorbis",
+        ),
+        (
+            "OGG192",
+            true,
+            Some(6400000),
+            "Ogg 192 kbps",
+            "native",
+            "vorbis",
+        ),
+        ("HQ", true, Some(10792943), "MP3 320 kbps", "native", "mp3"),
+        ("NAC", false, None, "AICodec", "download", "nac"),
+        ("SQ", true, Some(55397039), "FLAC", "native", "flac"),
+        ("RS", false, None, "FLAC Hi-Res", "native", "flac"),
+        ("QAI", true, Some(186980254), "FLAC", "native", "flac"),
+        ("Q360V1", true, Some(58805051), "FLAC", "native", "flac"),
+        ("Q360V2", true, Some(80437198), "FLAC", "native", "flac"),
+        (
+            "RA360",
+            false,
+            None,
+            "360 Reality Audio",
+            "download",
+            "unknown",
+        ),
+        ("DTS", false, None, "DTS", "download", "dts"),
+        ("DTSX", false, None, "DTS:X", "download", "dtsx"),
+        ("DA", true, Some(5112212), "E-AC-3 JOC", "joc", "ec-3"),
+        ("DAEAC3", true, Some(5112212), "E-AC-3 JOC", "joc", "ec-3"),
+        ("DA448", true, Some(8936764), "E-AC-3 JOC", "joc", "ec-3"),
+        ("DA1500", true, Some(29870162), "E-AC-3 JOC", "joc", "ec-3"),
+    ] {
+        let row = rows.iter().find(|row| row["quality"] == quality).unwrap();
+        assert_eq!(row["available"], available, "{quality}");
+        assert_eq!(row["sizeBytes"], json!(size), "{quality}");
+        assert_eq!(row["format"], format, "{quality}");
+        assert_eq!(row["playback"], playback, "{quality}");
+        assert_eq!(row["codec"], codec, "{quality}");
+        assert!(row["contentType"].as_str().unwrap().contains('/'));
+    }
     for private in ["vkey", "file_url", "qqmusic.qq.com", "example.invalid"] {
         assert!(!body.to_string().contains(private));
     }
 
     // A live URL for another tier cannot make a zero or missing HQ size available.
-    // No audio cache entry exists for HQ, so these requests also prove it does not probe HQ.
     for file in [json!({"size_320mp3":0}), json!({})] {
         qq.infos.put(
             "abc".into(),
@@ -690,7 +980,51 @@ async fn qualities_endpoint_returns_all_tiers_and_uses_shared_cached_probes() {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["qualities"][0]["available"], false);
-        assert_eq!(body["qualities"][0]["sizeBytes"], Value::Null);
+        let row = body["qualities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["quality"] == "HQ")
+            .unwrap();
+        assert_eq!(row["available"], false);
+        assert_eq!(row["sizeBytes"], Value::Null);
     }
+}
+
+#[tokio::test]
+async fn cached_payload_overrides_verified_default_without_cross_tier_leakage() {
+    let state = state(true);
+    let qq = state.qq.as_ref().unwrap();
+    qq.infos.put(
+        "abc".into(),
+        json!({"abc":{"track_info":{"mid":"abc","file":{
+            "size_96aac":960,"size_dolby":5112212
+        }}}}),
+    );
+    for quality in QUALITY_LIST
+        .into_iter()
+        .filter(|quality| quality.size_field().is_none())
+    {
+        qq.audio
+            .put(quality.cache_key("abc"), audio(quality, None, "nac"));
+    }
+    let mut da = audio(Quality::Da, Some(5112212), "mp4");
+    da.codec_hint = Some(Codec::Ac4);
+    qq.audio.put(Quality::Da.cache_key("abc"), da);
+    qq.audio.put(
+        Quality::Web.cache_key("abc"),
+        audio(Quality::Web, Some(1280), "mp3"),
+    );
+    let response = get(state, "/qq/song/abc/qualities").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+    let rows = body["qualities"].as_array().unwrap();
+    let row = |quality: &str| rows.iter().find(|row| row["quality"] == quality).unwrap();
+    assert_eq!(row("WEB")["sizeBytes"], 1280);
+    assert_eq!(row("WEB")["codec"], "mp3");
+    assert_eq!(row("DA")["playback"], "download");
+    assert_eq!(row("DA")["format"], "AC-4");
+    assert_eq!(row("DAEAC3")["playback"], "joc");
+    assert_eq!(row("DAEAC3")["sizeBytes"], 5112212);
 }
