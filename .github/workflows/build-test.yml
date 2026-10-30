@@ -76,3 +76,8 @@ jobs:
         # 歌词的对唱侧（src/ui/lyrics/ttml.mjs 的 duetSides 照 AMLL 逐行决定 isDuet），离线
         if: runner.os == 'Linux'
         run: node --test tests/agent_duet.mjs
+
+      - name: Run QQ source tests
+        # QQ DTOs, lyric priority, local favorites and separate source queues; offline
+        if: runner.os == 'Linux'
+        run: node --test tests/qq_source.mjs

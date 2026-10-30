@@ -760,3 +760,6 @@ async fn lyrics(
     Ok(Json(data))
 }
 
+#[cfg(test)]
+#[path = "../tests/qq_adapter/mod.rs"]
+mod tests;
