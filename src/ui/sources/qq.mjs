@@ -1,5 +1,6 @@
 // API requests use the local adapter; artwork uses public QQ CDN URLs from its DTOs.
 import { trackKey, withIdentity } from './track.mjs';
+import { artUrl } from '../library.mjs';
 export { trackKey } from './track.mjs';
 const MID = /^[0-9A-Za-z]{1,32}$/;
 export const enabled = () => globalThis.window?.AM_HOOK_HOST?.qqEnabled === true;
@@ -15,12 +16,12 @@ export function toTrack(dto) {
     artists, artist: artists.map((a) => a.name).join(' / '), album: String(dto.album || ''),
     albumId: albumMid, albumHref: '', href: '', country: '',
     duration: Number.isFinite(dto.durationMs) ? Math.max(0, dto.durationMs) : 0,
-    artwork: typeof dto.cover === 'string' ? dto.cover : '', explicit: false,
+    artwork: { url: typeof dto.cover === 'string' ? dto.cover : '' }, explicit: false,
     qq: { mid: id, albumMid, vip: dto.vip === true, ttml: dto.ttml === true },
   });
 }
 export function entryOf(track) {
-  return withIdentity({ ...track, track: track.id, artwork: track.artwork.replaceAll('{w}', '600').replaceAll('{h}', '600') });
+  return withIdentity({ ...track, track: track.id, artwork: artUrl(track.artwork, 600) });
 }
 async function request(path, signal) {
   const response = await fetch(path, { signal });
@@ -68,7 +69,8 @@ export function favorites(storage) {
       if (raw?.source !== 'qq' || !MID.test(String(raw.id))) continue;
       // Rebuild snapshots through the same DTO allowlist; never persist audio URLs.
       const track = toTrack({ id: raw.id, name: raw.name, artists: raw.artists?.map((a) => a.name),
-        album: raw.album, albumMid: raw.qq?.albumMid, cover: raw.artwork, durationMs: raw.duration, vip: raw.qq?.vip, ttml: raw.qq?.ttml });
+        album: raw.album, albumMid: raw.qq?.albumMid, cover: typeof raw.artwork === 'string' ? raw.artwork : raw.artwork?.url,
+        durationMs: raw.duration, vip: raw.qq?.vip, ttml: raw.qq?.ttml });
       unique.set(track.key, track);
     }
     return [...unique.values()];
