@@ -28,7 +28,7 @@ test('QQ DTO maps names, timing, badges and direct QQ artwork', () => {
   assert.deepEqual(track.artists, [{ name: '周杰伦', href: '' }]);
   assert.equal(track.duration, 269000);
   assert.deepEqual(track.qq, { mid: dto.id, albumMid: dto.albumMid, vip: true, ttml: true });
-  assert.deepEqual(track.artwork, { url: dto.cover });
+  assert.deepEqual(track.artwork, { url: qq.artworkUrl(dto.cover) });
   assert.equal(track.href, `/qq-song/${dto.id}`);
   assert.equal(track.albumHref, '');
   assert.equal(JSON.stringify(track).includes('example.invalid'), false);
@@ -36,7 +36,7 @@ test('QQ DTO maps names, timing, badges and direct QQ artwork', () => {
   const entry = qq.entryOf(track);
   assert.equal(entry.track, dto.id);
   assert.equal(entry.key, track.key);
-  assert.equal(entry.artwork, 'https://y.qq.com/music/photo_new/T002R600x600M000003DFRzD192KKD_5.jpg');
+  assert.equal(entry.artwork, 'https://y.qq.com/music/photo_new/T002R500x500M000003DFRzD192KKD_5.jpg');
   const opaque = { ...dto, cover: 'https://y.qq.com/cover.jpg?version=5' };
   assert.equal(qq.entryOf(qq.toTrack(opaque)).artwork, opaque.cover);
 });
@@ -136,7 +136,7 @@ test('QQ favorites persist independently, deduplicate keys and discard upstream 
   const track = qq.toTrack(dto);
   assert.equal(qq.toggleFavorite({ ...track, file_url: 'https://example.invalid/private' }, local), true);
   assert.equal(qq.favorites(local)[0].key, track.key);
-  assert.deepEqual(qq.favorites(local)[0].artwork, { url: dto.cover });
+  assert.deepEqual(qq.favorites(local)[0].artwork, { url: qq.artworkUrl(dto.cover) });
   assert.equal(local.getItem('am-hook:qq-favorites').includes('file_url'), false);
   assert.equal(local.getItem('am-hook:library'), 'Apple snapshot');
   local.setItem('am-hook:qq-favorites', JSON.stringify([track, track, { source: 'apple', id: track.id }, { source: 'qq', id: '../x' }]));
@@ -150,14 +150,21 @@ test('QQ favorites persist independently, deduplicate keys and discard upstream 
 
 test('QQ covers resolve for rows, legacy favorites and player entries; Apple templates retain their shape', () => {
   const track = qq.toTrack(dto);
-  const resolved = (size) => dto.cover.replace('{w}', size).replace('{h}', size);
-  assert.equal(artUrl(track.artwork, 80), resolved(80));
+  const fixed = dto.cover.replace('{w}', '500').replace('{h}', '500');
+  assert.equal(track.artwork.url, fixed);
+  assert.doesNotMatch(track.artwork.url, /\{[wh]\}/);
+  for (const size of [68, 80, 96, 160, 600, 632, 1000]) assert.equal(artUrl(track.artwork, size), fixed);
   const local = storage();
-  local.setItem('am-hook:qq-favorites', JSON.stringify([{ ...track, artwork: dto.cover }]));
-  assert.deepEqual(qq.favorites(local)[0].artwork, { url: dto.cover });
-  assert.equal(artUrl(qq.favorites(local)[0].artwork, 96), resolved(96));
-  assert.equal(qq.entryOf(track).artwork, resolved(600));
-  assert.equal(qq.entryOf({ ...track, artwork: dto.cover }).artwork, resolved(600));
+  for (const artwork of [dto.cover, { url: dto.cover }]) {
+    local.setItem('am-hook:qq-favorites', JSON.stringify([{ ...track, artwork }]));
+    assert.deepEqual(qq.favorites(local)[0].artwork, { url: fixed });
+    assert.equal(artUrl(qq.favorites(local)[0].artwork, 96), fixed);
+    assert.equal(qq.entryOf({ ...track, artwork }).artwork, fixed);
+    const favorite = qq.favorites(local)[0];
+    assert.equal(qq.entryOf(favorite).artwork, fixed);
+    assert.equal(qq.qualityItem(favorite, 'SQ').artwork, fixed);
+  }
+  assert.equal(qq.entryOf(track).artwork, fixed);
   const apple = 'https://example.com/{w}x{h}{c}.{f}';
   assert.equal(artUrl(apple, 80, 60), 'https://example.com/80x60bb.jpg');
   assert.equal(artUrl({ url: apple }, 80, 60), 'https://example.com/80x60bb.jpg');
@@ -177,6 +184,7 @@ test('QQ clients only request local adapter paths and pass cancellation signals'
     const result = await qq.searchSongs('晴天 & 风', { limit: 10, offset: 20, signal: controller.signal });
     assert.equal(result.total, 99);
     assert.equal(result.songs[0].key, `qq:${dto.id}`);
+    assert.equal(result.songs[0].artwork.url, 'https://y.qq.com/music/photo_new/T002R500x500M000003DFRzD192KKD_5.jpg');
     assert.equal(new URL(calls[0].path, 'https://example.invalid').searchParams.get('q'), '晴天 & 风');
     assert.equal(calls[0].options.signal, controller.signal);
     assert.equal((await qq.song(dto.id)).key, `qq:${dto.id}`);
@@ -209,6 +217,8 @@ test('QQ plays the local 302 route through native audio without asking Apple for
   assert.equal(player.current.source, 'qq');
   assert.equal(player.current.mode, 'native');
   assert.equal(player.current.key, `qq:${dto.id}`);
+  assert.equal(player.current.artwork, 'https://y.qq.com/music/photo_new/T002R500x500M000003DFRzD192KKD_5.jpg');
+  assert.equal(player.queue.entries[0].artwork, player.current.artwork);
   assert.equal(player.audio.src, `/qq/song/${dto.id}/play`);
   assert.equal(player.audio.paused, false);
 });
@@ -223,6 +233,8 @@ test('every native QQ quality reaches the play URL and matching playback label',
     assert.equal(player.audio.src, qq.playUrl(dto.id, quality));
     assert.equal(player.modeText(), `QQ · ${quality}`);
     assert.equal(player.current.href, qq.songPath(dto.id));
+    assert.equal(player.current.artwork, track.artwork.url);
+    assert.equal(player.queue.entries[0].artwork, track.artwork.url);
     assert.equal(player.queue.entries[0].quality, quality);
   }
 });

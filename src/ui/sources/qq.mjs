@@ -1,6 +1,5 @@
 // API requests use the local adapter; artwork uses public QQ CDN URLs from its DTOs.
 import { trackKey, withIdentity } from './track.mjs';
-import { artUrl } from '../library.mjs';
 export { trackKey } from './track.mjs';
 const MID = /^[0-9A-Za-z]{1,32}$/;
 export const enabled = () => globalThis.window?.AM_HOOK_HOST?.qqEnabled === true;
@@ -36,6 +35,11 @@ const qualityQuery = (quality) => quality === undefined ? '' : `?quality=${quali
 export const songPath = (id) => `/qq-song/${mid(id)}`;
 export const playUrl = (id, quality) => `/qq/song/${mid(id)}/play${qualityQuery(quality)}`;
 export const downloadUrl = (id, quality) => `/qq/song/${mid(id)}/download${qualityQuery(quality)}`;
+/** photo_new only serves discrete sizes. Resolve before Apple-sized consumers see it. */
+export function artworkUrl(artwork) {
+  const url = typeof artwork === 'string' ? artwork : artwork?.url;
+  return typeof url === 'string' ? url.replaceAll('{w}', '500').replaceAll('{h}', '500') : '';
+}
 export function toTrack(dto) {
   const id = mid(dto.id);
   const albumMid = MID.test(dto.albumMid || '') ? dto.albumMid : id;
@@ -45,12 +49,12 @@ export function toTrack(dto) {
     artists, artist: artists.map((a) => a.name).join(' / '), album: String(dto.album || ''),
     albumId: albumMid, albumHref: '', href: songPath(id), country: '',
     duration: Number.isFinite(dto.durationMs) ? Math.max(0, dto.durationMs) : 0,
-    artwork: { url: typeof dto.cover === 'string' ? dto.cover : '' }, explicit: false,
+    artwork: { url: artworkUrl(dto.cover) }, explicit: false,
     qq: { mid: id, albumMid, vip: dto.vip === true, ttml: dto.ttml === true },
   });
 }
 export function entryOf(track) {
-  return withIdentity({ ...track, track: track.id, artwork: artUrl(track.artwork, 600) });
+  return withIdentity({ ...track, track: track.id, artwork: artworkUrl(track.artwork) });
 }
 export function qualityEntry(track, quality, row) {
   return { ...entryOf(track), quality: qualityId(quality), ...playbackInfo(quality, row) };

@@ -1,6 +1,4 @@
 .qq-song-page .qq-quality { grid-template-columns: minmax(0, 1fr) auto; padding: 14px 16px; background: color-mix(in srgb, var(--text) 4%, transparent); }
-.qq-quality.unavailable { opacity: .45; }
-.qq-quality.unavailable:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
 .qq-quality-tip { margin-top: 4px; color: var(--muted); font-size: 13px; }
 .qq-quality-actions { display: flex; gap: 8px; align-items: center; }
 .qq-quality-download { text-decoration: none; }

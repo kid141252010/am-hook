@@ -80,3 +80,34 @@ DAEAC3 通过同源 `/qq/song/:mid/download?quality=DAEAC3` 读取字节，`qq-j
 - 修改过的 JS/MJS 语法检查、`git diff --check` 通过。新容器测试已加入 GitHub Actions 的 QQ 测试步骤。
 
 测试用合成 info/URL 响应验证契约、字段匹配与实际载荷覆盖，用真实离线 E-AC-3 fixture 验证容器衔接；不以合成数据证明线上映射，也不将离线验证描述成两首 QQ 样本的端到端试听。既有 JOC 管线要求 48 kHz E-AC-3，当前核心 PCM 支持 6/8 声道；解包器会在送入前拒绝不支持的 sample entry、频率及歧义容器形式。
+
+## 封面尺寸与不可用档位修复（2026-10-31）
+
+任务提供的《十一月的萧邦》`photo_new` 封面尺寸阶梯实测如下（HTTP 状态）：
+
+| 方形边长（px） | HTTP 状态 |
+| --- | --- |
+| 68 / 90 / 150 / 300 / 500 / 800 | 200 |
+| 96 / 160 / 600 / 632 / 1000 | 404 |
+
+这是离散尺寸限制；此前仅把 artwork 包成 `{url}` 仍会被行、radiosity、播放器和详情头替换为不存在的尺寸。前端 `sources/qq.mjs` 的 `artworkUrl` 在 DTO 转换时将 `{w}` / `{h}` 固定为 500，输出的 `track.artwork.url` 是不含尺寸占位符的完整直链，例如 `https://y.qq.com/music/photo_new/T002R500x500M000003DFRzD192KKD_5.jpg`。`entryOf` 使用同一归一化函数，移除了 QQ 的 600 尺寸转换；已有完整 URL 原样保留。
+
+消费路径核对：
+
+| 消费方 | 路径与结果 |
+| --- | --- |
+| 搜索行 | `searchSongs → toTrack → home.renderQQTracks → library-ui.trackRow`；行请求 80 或其他消费者请求 96 时仍为 500 直链 |
+| 详情封面与光晕 | `song → toTrack → createDetailHeader`；632 / 160 的替换不再改变 URL |
+| 旧收藏与收藏行 | `favorites → toTrack` 重建旧模板字符串及 `{url}` 快照；读取即归一化，后续收藏写入也保存固定 URL |
+| 播放器与队列 | 搜索、收藏、菜单和详情的队列入口调用 `qq.entryOf`；选档经 `qualityEntry / qualityItem`，当前播放和队列直接使用同一个 500 URL |
+
+详情页在渲染前过滤归一化音质行，仅渲染 `available=true`（沿用原有正数大小校验）的档位；不可用档整行不进入 DOM，移除对应灰色样式。可用但无解码器或浏览器不支持的档仍提供下载。加载中、全不可用、请求失败时都不生成占位音质行，失败提示继续显示。后端 DTO 及完整 20 档契约不变。
+
+本轮离线验证：
+
+- `node --test --test-isolation=none tests/qq_source.mjs tests/qq_ui.mjs tests/qq_joc_input.mjs tests/player_artwork.cjs tests/player_modes.cjs`：**41 项通过，0 失败**；同一组文件以默认隔离模式运行也通过。覆盖尺寸替换、两种旧收藏形状、Apple 模板、真实详情挂载及点击入口、播放队列、语言重绘、下载档保留、全不可用与请求失败。UI 测试及封面测试已加入 GitHub Actions 的 QQ 步骤。
+- `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**67 项通过，0 失败，仅过滤指定的 3 个 wrapper 端口测试**。
+- `cargo clippy --offline -p am-hook --all-targets -- -D warnings`：**通过，无 warning**。
+- 修改过的 JS/MJS 均通过 `node --check`，`git diff --check` 通过。
+
+尺寸阶梯结果来自任务已确认的实测，本轮离线回归未重新请求 CDN。
