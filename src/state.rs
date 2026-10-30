@@ -5,6 +5,7 @@ use std::time::Duration;
 pub struct Config {
     pub wrapper_url: String,
     pub amll_api: String,
+    pub qq_api: Option<String>,
     /// amp-api 连接空闲时的保活周期，0 表示不发送保活请求
     pub amp_keepalive: Duration,
     /// amp-api 响应缓存容量（MB），0 表示不缓存
@@ -30,6 +31,7 @@ pub struct Config {
 
 pub struct AppState {
     pub config: Config,
+    pub qq: Option<crate::qq::Qq>,
     pub http_client: reqwest::Client,
     /// 同 `http_client`，但重定向只允许跳到 apple.com（处理不受信任的 URL）
     pub apple_client: reqwest::Client,
@@ -49,6 +51,7 @@ impl AppState {
         Self::with_config(Config {
             wrapper_url: wrapper_url.trim_end_matches('/').to_string(),
             amll_api: "https://api.amll.dev".into(),
+            qq_api: None,
             amp_keepalive: Duration::from_secs(30),
             amp_cache_mb: 32,
             wrapper_rate: 24,
@@ -89,7 +92,8 @@ impl AppState {
         let amp = Arc::new(crate::amp::Amp::new(config.amp_cache_mb * 1024 * 1024));
         let wrapper = crate::wrapper::Wrapper::new(&config);
         let client_limit = crate::limit::ClientLimit::new(config.client_rate, config.client_concurrency, config.client_ip_header.as_deref());
-        Self { config, http_client, apple_client, wrapper, amp, client_limit, status_cache: Default::default() }
+        let qq = config.qq_api.as_deref().map(|base| crate::qq::Qq::new(base, &config.amll_api));
+        Self { config, qq, http_client, apple_client, wrapper, amp, client_limit, status_cache: Default::default() }
     }
 }
 

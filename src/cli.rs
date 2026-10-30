@@ -52,6 +52,10 @@ pub struct Cli {
     #[arg(long, env = "AM_HOOK_AMLL_API", default_value = "https://api.amll.dev")]
     pub amll_api: String,
 
+    /// Server-only QQ API base URL (e.g. https://example.invalid/api/web)
+    #[arg(long, env = "AM_HOOK_QQ_API", hide_env_values = true)]
+    pub qq_api: Option<String>,
+
     /// Max wrapper-lite requests relayed per client IP in any 60 seconds (/status not
     /// counted); further requests get HTTP 429 with Retry-After. 0 = unlimited
     #[arg(long, default_value_t = 0)]
@@ -109,6 +113,7 @@ impl Cli {
         Ok(Config {
             wrapper_url: self.wrapper_url.trim_end_matches('/').to_string(),
             amll_api: self.amll_api.trim_end_matches('/').to_string(),
+            qq_api: self.qq_api.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.trim_end_matches('/').to_owned()),
             amp_keepalive: Duration::from_secs(self.amp_keepalive),
             amp_cache_mb: self.amp_cache_mb,
             wrapper_rate: self.wrapper_rate,

@@ -5,6 +5,7 @@ pub mod limit;
 pub mod log;
 pub mod links;
 pub mod state;
+pub mod qq;
 pub mod ui;
 pub mod updater;
 pub mod wrapper;
@@ -38,6 +39,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), ui::require_relay));
     router
         .merge(relay)
+        .merge(if state.qq.is_some() { qq::routes() } else { Router::new() })
         .route(assets::HOST_JS, get(ui::host_js_handler))
         .route("/", get(ui::app_handler))
         // 「新发现」（官网 /{cc}/new，这里跟随主地区）

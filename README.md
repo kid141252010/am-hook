@@ -559,3 +559,7 @@ Questions, feedback and discussion: the Telegram group [@apple_music_alac](https
 am-hook is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (AGPL-3.0-only), because the web UI embeds the AGPL-licensed [AMLL](https://github.com/amll-dev/applemusic-like-lyrics) lyric player. If you run a modified version as a network service, you must offer its users the corresponding source.
 
 Bundled third-party components keep their own licenses: `crates/temari` (MIT), the hls.js CEA-608 parser (Apache-2.0, `browser/cea608/LICENSE`), `@mediabunny/ac3` (MPL-2.0, `src/ui/EC3-LICENSE.txt`), AMLL with its dependencies (AGPL-3.0-only, `browser/amll`), the JOC renderer from am-hook-joc (AGPL-3.0-only or MIT, `crates/joc-core/LICENSE`) and the SADIE II HRTF fields (Apache-2.0, see `src/ui/JOC-NOTICE.md`).
+
+### QQ music source (optional)
+
+Configure `--qq-api https://example.invalid/api/web` or `AM_HOOK_QQ_API` on the Rust server. The base URL is server-only; omitting it disables all QQ routes and UI entries. QQ search, playback (302 to QQ CDN), proxied covers/lyrics/downloads and browser-local favorites are supported. Lyrics prefer the configured `--amll-api` (`qqMusicId`), then upstream TTML, decrypted QRC when available, and LRC. Apple and QQ use separate playback queues. No QQ login or client credentials are required.
