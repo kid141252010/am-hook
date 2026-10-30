@@ -56,6 +56,10 @@ pub struct Cli {
     #[arg(long, env = "AM_HOOK_QQ_API", hide_env_values = true)]
     pub qq_api: Option<String>,
 
+    /// Server-only outbound proxy for QQ API and media requests (HTTP or SOCKS5)
+    #[arg(long, env = "AM_HOOK_QQ_PROXY", hide_env_values = true)]
+    pub qq_proxy: Option<String>,
+
     /// Max wrapper-lite requests relayed per client IP in any 60 seconds (/status not
     /// counted); further requests get HTTP 429 with Retry-After. 0 = unlimited
     #[arg(long, default_value_t = 0)]
@@ -106,6 +110,7 @@ impl Cli {
     }
 
     pub fn config(&self) -> Result<Config, String> {
+        crate::qq::outbound_proxy(self.qq_proxy.as_deref())?;
         let wrapper_auth = match &self.wrapper_auth {
             Some(raw) => crate::wrapper::normalize_authorization(raw)?,
             None => None,

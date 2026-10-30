@@ -9,14 +9,15 @@ const { AmPlayer, trackKey: playerKey } = createRequire(import.meta.url)('../src
 const dto = {
   id: '0039MnYb0qxYhV', name: '晴天', artists: ['周杰伦'], album: '叶惠美', albumMid: '003DFRzD192KKD',
   durationMs: 269000, vip: true, ttml: true,
-  file_url: 'https://example.invalid/private.mp3', cover: 'https://example.invalid/private.jpg',
+  file_url: 'https://example.invalid/private.mp3',
+  cover: 'https://y.qq.com/music/photo_new/T002R{w}x{h}M000003DFRzD192KKD_5.jpg',
 };
 const storage = () => {
   const data = new Map();
   return { getItem: (key) => data.get(key) ?? null, setItem: (key, value) => data.set(key, value) };
 };
 
-test('QQ DTO maps names, timing and badges and rebuilds same-origin artwork', () => {
+test('QQ DTO maps names, timing, badges and direct QQ artwork', () => {
   const track = qq.toTrack(dto);
   assert.equal(track.key, 'qq:0039MnYb0qxYhV');
   assert.equal(track.source, 'qq');
@@ -26,7 +27,7 @@ test('QQ DTO maps names, timing and badges and rebuilds same-origin artwork', ()
   assert.deepEqual(track.artists, [{ name: '周杰伦', href: '' }]);
   assert.equal(track.duration, 269000);
   assert.deepEqual(track.qq, { mid: dto.id, albumMid: dto.albumMid, vip: true, ttml: true });
-  assert.equal(track.artwork, `/qq/cover/${dto.albumMid}?s={w}`);
+  assert.equal(track.artwork, dto.cover);
   assert.equal(track.href, '');
   assert.equal(track.albumHref, '');
   assert.equal(JSON.stringify(track).includes('example.invalid'), false);
@@ -34,13 +35,15 @@ test('QQ DTO maps names, timing and badges and rebuilds same-origin artwork', ()
   const entry = qq.entryOf(track);
   assert.equal(entry.track, dto.id);
   assert.equal(entry.key, track.key);
-  assert.equal(entry.artwork, `/qq/cover/${dto.albumMid}?s=600`);
+  assert.equal(entry.artwork, 'https://y.qq.com/music/photo_new/T002R600x600M000003DFRzD192KKD_5.jpg');
+  const opaque = { ...dto, cover: 'https://y.qq.com/cover.jpg?version=5' };
+  assert.equal(qq.entryOf(qq.toTrack(opaque)).artwork, opaque.cover);
 });
 
 test('QQ optional fields default safely; invalid IDs cannot form adapter paths', () => {
   const track = qq.toTrack({ id: '1', albumMid: '../bad', durationMs: -5 });
   assert.equal(track.duration, 0);
-  assert.equal(track.artwork, '/qq/cover/1?s={w}');
+  assert.equal(track.artwork, '');
   assert.equal(track.qq.vip, false);
   assert.equal(track.qq.ttml, false);
   assert.deepEqual(track.artists, []);
@@ -92,6 +95,7 @@ test('QQ favorites persist independently, deduplicate keys and discard upstream 
   const track = qq.toTrack(dto);
   assert.equal(qq.toggleFavorite({ ...track, file_url: 'https://example.invalid/private' }, local), true);
   assert.equal(qq.favorites(local)[0].key, track.key);
+  assert.equal(qq.favorites(local)[0].artwork, dto.cover);
   assert.equal(local.getItem('am-hook:qq-favorites').includes('file_url'), false);
   assert.equal(local.getItem('am-hook:library'), 'Apple snapshot');
   local.setItem('am-hook:qq-favorites', JSON.stringify([track, track, { source: 'apple', id: track.id }, { source: 'qq', id: '../x' }]));

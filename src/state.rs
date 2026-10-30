@@ -66,6 +66,11 @@ impl AppState {
     }
 
     pub fn with_config(config: Config) -> Self {
+        Self::with_qq_proxy(config, None).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// QQ 出站代理仅用于 QQ 客户端，不进入共享页面配置。
+    pub fn with_qq_proxy(config: Config, qq_proxy: Option<&str>) -> Result<Self, String> {
         // wrapper-lite 与 Apple CDN（master m3u8）：保持 HTTP/1.1、不请求压缩（amp-api 另用专用客户端）
         let builder = || reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -92,8 +97,10 @@ impl AppState {
         let amp = Arc::new(crate::amp::Amp::new(config.amp_cache_mb * 1024 * 1024));
         let wrapper = crate::wrapper::Wrapper::new(&config);
         let client_limit = crate::limit::ClientLimit::new(config.client_rate, config.client_concurrency, config.client_ip_header.as_deref());
-        let qq = config.qq_api.as_deref().map(|base| crate::qq::Qq::new(base, &config.amll_api));
-        Self { config, qq, http_client, apple_client, wrapper, amp, client_limit, status_cache: Default::default() }
+        let qq = config.qq_api.as_deref()
+            .map(|base| crate::qq::Qq::new(base, &config.amll_api, qq_proxy))
+            .transpose()?;
+        Ok(Self { config, qq, http_client, apple_client, wrapper, amp, client_limit, status_cache: Default::default() })
     }
 }
 

@@ -1,4 +1,4 @@
-// Only same-origin adapter URLs belong here. The upstream base stays on the server.
+// API requests use the local adapter; artwork uses public QQ CDN URLs from its DTOs.
 import { trackKey, withIdentity } from './track.mjs';
 export { trackKey } from './track.mjs';
 const MID = /^[0-9A-Za-z]{1,32}$/;
@@ -15,7 +15,7 @@ export function toTrack(dto) {
     artists, artist: artists.map((a) => a.name).join(' / '), album: String(dto.album || ''),
     albumId: albumMid, albumHref: '', href: '', country: '',
     duration: Number.isFinite(dto.durationMs) ? Math.max(0, dto.durationMs) : 0,
-    artwork: `/qq/cover/${albumMid}?s={w}`, explicit: false,
+    artwork: typeof dto.cover === 'string' ? dto.cover : '', explicit: false,
     qq: { mid: id, albumMid, vip: dto.vip === true, ttml: dto.ttml === true },
   });
 }
@@ -68,7 +68,7 @@ export function favorites(storage) {
       if (raw?.source !== 'qq' || !MID.test(String(raw.id))) continue;
       // Rebuild snapshots through the same DTO allowlist; never persist audio URLs.
       const track = toTrack({ id: raw.id, name: raw.name, artists: raw.artists?.map((a) => a.name),
-        album: raw.album, albumMid: raw.qq?.albumMid, durationMs: raw.duration, vip: raw.qq?.vip, ttml: raw.qq?.ttml });
+        album: raw.album, albumMid: raw.qq?.albumMid, cover: raw.artwork, durationMs: raw.duration, vip: raw.qq?.vip, ttml: raw.qq?.ttml });
       unique.set(track.key, track);
     }
     return [...unique.values()];

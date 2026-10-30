@@ -1,4 +1,4 @@
-//! Server-only QQ adapter. Upstream URLs and response headers never enter DTOs.
+//! Server-only QQ adapter. Only public QQ artwork URLs enter DTOs.
 use crate::state::AppState;
 use axum::{
     body::Body,
@@ -69,6 +69,25 @@ fn cdn_url(raw: &str) -> Option<reqwest::Url> {
     .then_some(url)
 }
 
+pub(crate) fn outbound_proxy(proxy: Option<&str>) -> Result<Option<reqwest::Proxy>, String> {
+    let Some(proxy) = proxy.map(str::trim).filter(|url| !url.is_empty()) else {
+        return Ok(None);
+    };
+    let url = reqwest::Url::parse(proxy).map_err(|e| format!("Invalid QQ proxy: {e}"))?;
+    // reqwest accepts unknown schemes here and silently ignores them when routing.
+    if !url.has_host()
+        || !matches!(
+            url.scheme(),
+            "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+        )
+    {
+        return Err("Invalid QQ proxy: unsupported scheme or missing host".into());
+    }
+    reqwest::Proxy::all(url)
+        .map(Some)
+        .map_err(|e| format!("Invalid QQ proxy: {}", e.without_url()))
+}
+
 struct Cache<T> {
     entries: Mutex<LruCache<String, (Instant, T)>>,
     ttl: Duration,
@@ -108,17 +127,15 @@ pub struct Qq {
     searches: Cache<SearchResult>,
     songs: Cache<Song>,
     lyrics: Cache<Lyrics>,
-    covers: Cache<String>,
 }
 impl Qq {
-    pub fn new(base: &str, amll: &str) -> Self {
-        let api = reqwest::Client::builder()
+    pub fn new(base: &str, amll: &str, proxy: Option<&str>) -> Result<Self, String> {
+        let proxy = outbound_proxy(proxy)?;
+        let mut api = reqwest::Client::builder()
             .user_agent("am-hook")
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("QQ API client");
-        let media = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15));
+        let mut media = reqwest::Client::builder()
             .user_agent("am-hook")
             .connect_timeout(Duration::from_secs(5))
             .read_timeout(Duration::from_secs(30))
@@ -128,20 +145,25 @@ impl Qq {
                 } else {
                     a.stop()
                 }
-            }))
-            .build()
-            .expect("QQ CDN client");
-        Self {
+            }));
+        if let Some(proxy) = proxy {
+            api = api.proxy(proxy.clone());
+            media = media.proxy(proxy);
+        }
+        Ok(Self {
             base: base.trim_end_matches('/').into(),
             amll: amll.trim_end_matches('/').into(),
-            api,
-            media,
+            api: api
+                .build()
+                .map_err(|e| format!("QQ API client: {}", e.without_url()))?,
+            media: media
+                .build()
+                .map_err(|e| format!("QQ CDN client: {}", e.without_url()))?,
             permits: tokio::sync::Semaphore::new(8),
             searches: Cache::new(128, 600),
             songs: Cache::new(4096, 86400),
             lyrics: Cache::new(1024, 604800),
-            covers: Cache::new(4096, 86400),
-        }
+        })
     }
     async fn request(&self, path: &str, params: &[(&str, String)]) -> ApiResult<Value> {
         let _permit = self.permits.acquire().await.map_err(|_| unavailable())?;
@@ -180,20 +202,26 @@ impl Qq {
             .or_else(|| {
                 let pic = album.get("picUrl")?.as_str()?;
                 cdn_url(pic)?;
-                Regex::new(r"T002(?:R\d+x\d+)?M000([0-9A-Za-z]{1,32})\.")
+                Regex::new(r"T002(?:R\d+x\d+)?M000([0-9A-Za-z]{1,32})(?:_\d+)?\.")
                     .ok()?
                     .captures(pic)
                     .map(|c| c[1].to_owned())
             })
             .or_else(|| album.get("id").map(string).filter(|s| valid_mid(s)))
             .unwrap_or_else(|| id.clone());
-        if let Some(url) = album
+        let cover = album
             .get("picUrl")
             .and_then(Value::as_str)
-            .and_then(cdn_url)
-        {
-            self.covers.put(album_mid.clone(), url.to_string());
-        }
+            .filter(|url| cdn_url(url).is_some())
+            .map(|url| {
+                Regex::new(r"T002(?:R\d+x\d+)?M000")
+                    .unwrap()
+                    .replace(url, "T002R{w}x{h}M000")
+                    .into_owned()
+            })
+            .unwrap_or_else(|| {
+                format!("https://y.gtimg.cn/music/photo_new/T002R{{w}}x{{h}}M000{album_mid}.jpg")
+            });
         let artists = raw
             .get("ar")
             .or_else(|| raw.get("singer"))
@@ -226,7 +254,7 @@ impl Qq {
                 .into(),
             album_mid: album_mid.clone(),
             duration_ms,
-            cover: format!("/qq/cover/{album_mid}"),
+            cover,
             vip: raw.get("fee").and_then(Value::as_u64) == Some(1)
                 || raw.pointer("/pay/pay_play").and_then(Value::as_u64) == Some(1),
             ttml: raw.get("ttml").is_some_and(|v| v == 1 || v == true),
@@ -326,7 +354,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/qq/song/:mid/play", get(play))
         .route("/qq/song/:mid/download", get(download))
         .route("/qq/song/:mid/lyrics", get(lyrics))
-        .route("/qq/cover/:mid", get(cover))
         .route("/qq/capabilities", get(capabilities))
 }
 async fn capabilities(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
@@ -451,51 +478,6 @@ async fn download(
         ))
         .unwrap())
 }
-#[derive(Deserialize)]
-struct CoverQuery {
-    s: Option<u16>,
-}
-async fn cover(
-    State(state): State<Arc<AppState>>,
-    Path(mid): Path<String>,
-    Query(q): Query<CoverQuery>,
-) -> ApiResult<Response> {
-    let qq = adapter(&state)?;
-    check_mid(&mid)?;
-    let size = q.s.unwrap_or(800).clamp(80, 800);
-    let url = qq.covers.get(&mid).unwrap_or_else(|| {
-        format!("https://y.gtimg.cn/music/photo_new/T002R{size}x{size}M000{mid}.jpg")
-    });
-    let response = qq
-        .media
-        .get(url)
-        .send()
-        .await
-        .map_err(network)?
-        .error_for_status()
-        .map_err(network)?;
-    if !response.status().is_success() {
-        return Err(missing());
-    }
-    let mime = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| matches!(*s, "image/jpeg" | "image/png" | "image/webp"))
-        .unwrap_or("image/jpeg");
-    let out = Response::builder()
-        .header(header::CONTENT_TYPE, mime)
-        .header(header::CACHE_CONTROL, "public, max-age=2592000, immutable");
-    use futures::TryStreamExt;
-    Ok(out
-        .body(Body::from_stream(
-            response
-                .bytes_stream()
-                .map_err(|e| std::io::Error::other(e.without_url())),
-        ))
-        .unwrap())
-}
-
 fn xml(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
