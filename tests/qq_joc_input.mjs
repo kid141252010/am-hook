@@ -214,7 +214,7 @@ test('QQ quality switching enters JocLiveEngine through QQ input and resumes nat
     await player.switchVariant(qq.qualityVariant('DAEAC3', { format: 'E-AC-3 JOC' }));
     const engine = player.pcm;
     assert.ok(engine instanceof JocLiveEngine);
-    assert.deepEqual(calls, ['/qq/song/WET/download?quality=DAEAC3']);
+    assert.deepEqual(calls, ['/qq/song/WET/qualities', '/qq/song/WET/download?quality=DAEAC3']);
     assert.equal(player.current.mode, 'joc2');
     assert.equal(engine.currentTime, 0.25);
     assert.equal(engine.paused, false);

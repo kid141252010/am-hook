@@ -295,7 +295,7 @@ export const prefs = {
 };
 
 // 其他标签页修改后同步
-addEventListener('storage', (event) => {
+if (typeof addEventListener === 'function') addEventListener('storage', (event) => {
   if (event.key !== STORAGE_KEY) return;
   const before = JSON.stringify(state);
   state = load();

@@ -334,7 +334,6 @@ test('Apple defaults use existing capability filtering, respect preference with 
     usePlaybackSettings(null);
     useJocSettings(null);
   }
->>>>>>> fccc172 (feat(settings): share default streaming quality across QQ and Apple)
 });
 
 test('every native QQ quality reaches the play URL and matching playback label', async () => {
