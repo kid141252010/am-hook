@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import * as qq from '../src/ui/sources/qq.mjs';
 import { sourceOf, trackKey, withIdentity } from '../src/ui/sources/track.mjs';
 import { artUrl } from '../src/ui/library.mjs';
-const { AmPlayer, trackKey: playerKey } = createRequire(import.meta.url)('../src/ui/player.js');
+const { AmPlayer, trackKey: playerKey, detectQqModes, useJocSettings } = createRequire(import.meta.url)('../src/ui/player.js');
 
 const dto = {
   id: '0039MnYb0qxYhV', name: '晴天', artists: ['周杰伦'], album: '叶惠美', albumMid: '003DFRzD192KKD',
@@ -66,18 +66,20 @@ test('QQ quality rows list all tiers, retain formats and sizes, and omit unavail
     { quality: 'NAC', available: true, sizeBytes: 0, format: 'AAC' },
     { quality: 'unknown', available: true, sizeBytes: 42, format: 'ignored' },
   ] }, dto.id);
-  assert.deepEqual(rows.map((row) => row.quality), ['HQ', 'SQ', 'WEB', 'NAC', 'RS']);
-  assert.deepEqual(rows.map((row) => row.available), [true, true, false, false, false]);
-  assert.equal(rows[0].format, 'MP3 320 kbps');
-  assert.equal(rows[0].sizeBytes, 10792943);
-  assert.equal(rows[1].downloadUrl, `/qq/song/${dto.id}/download?quality=SQ`);
-  assert.equal(rows[1].playUrl, `/qq/song/${dto.id}/play?quality=SQ`);
-  for (const row of rows.slice(2)) {
+  assert.deepEqual(rows.map((row) => row.quality), ['MP3128', 'AAC48', 'WEB', 'AAC192', 'OGG96', 'OGG192', 'HQ', 'NAC',
+    'SQ', 'RS', 'QAI', 'Q360V1', 'Q360V2', 'RA360', 'DTS', 'DTSX', 'DA', 'DAEAC3', 'DA448', 'DA1500']);
+  const byQuality = Object.fromEntries(rows.map((row) => [row.quality, row]));
+  assert.equal(byQuality.HQ.format, 'MP3 320 kbps');
+  assert.equal(byQuality.HQ.sizeBytes, 10792943);
+  assert.equal(byQuality.SQ.downloadUrl, `/qq/song/${dto.id}/download?quality=SQ`);
+  assert.equal(byQuality.SQ.playUrl, `/qq/song/${dto.id}/play?quality=SQ`);
+  for (const row of rows.filter((row) => !['HQ', 'SQ'].includes(row.quality))) {
+    assert.equal(row.available, false);
     assert.equal(Object.hasOwn(row, 'playUrl'), false);
     assert.equal(Object.hasOwn(row, 'downloadUrl'), false);
   }
-  assert.equal(rows[4].sizeBytes, null);
-  assert.equal(qq.qualityRows(null, dto.id).length, 5);
+  assert.equal(byQuality.RS.sizeBytes, null);
+  assert.equal(qq.qualityRows(null, dto.id).length, 20);
   for (const quality of ['', 'hq', '../SQ', 'HQ&x=1', null, 1]) {
     assert.throws(() => qq.playUrl(dto.id, quality));
     assert.throws(() => qq.downloadUrl(dto.id, quality));
@@ -179,7 +181,7 @@ test('QQ clients only request local adapter paths and pass cancellation signals'
     assert.equal(calls[0].options.signal, controller.signal);
     assert.equal((await qq.song(dto.id)).key, `qq:${dto.id}`);
     assert.equal((await qq.lyrics(dto.id, parse)).source, 'lrc');
-    assert.equal((await qq.qualities(dto.id, controller.signal))[0].available, true);
+    assert.equal((await qq.qualities(dto.id, controller.signal)).find((row) => row.quality === 'HQ').available, true);
     assert.equal(calls.at(-1).options.signal, controller.signal);
     assert.ok(calls.every(({ path }) => path.startsWith('/qq/')));
     globalThis.fetch = async () => ({ ok: false, status: 503, json() { throw new Error('must not read upstream body'); } });
@@ -211,9 +213,9 @@ test('QQ plays the local 302 route through native audio without asking Apple for
   assert.equal(player.audio.paused, false);
 });
 
-test('every QQ quality reaches the native play URL and matching playback label', async () => {
+test('every native QQ quality reaches the play URL and matching playback label', async () => {
   const track = qq.toTrack(dto);
-  for (const quality of qq.QUALITY_IDS) {
+  for (const quality of qq.QUALITY_IDS.filter((quality) => qq.playbackInfo(quality).playback === 'native')) {
     const player = playerHarness();
     await player.playQueue([qq.qualityEntry(track, quality)]);
     assert.equal(player.current.quality, quality);
@@ -252,13 +254,13 @@ test('a first queued QQ song is loaded paused and a saved pending queue is acces
   assert.equal(player.queue.entries.length, 1);
 
   const other = playerHarness();
-  other.appendQueue(qq.qualityEntry(qq.toTrack(dto), 'NAC'));
+  other.appendQueue(qq.qualityEntry(qq.toTrack(dto), 'AAC48'));
   assert.equal(other.current, null);
   other.switchSource('qq');
   await new Promise(setImmediate);
-  assert.equal(other.current.quality, 'NAC');
+  assert.equal(other.current.quality, 'AAC48');
   assert.equal(other.audio.paused, true);
-  assert.equal(other.audio.src, qq.playUrl(dto.id, 'NAC'));
+  assert.equal(other.audio.src, qq.playUrl(dto.id, 'AAC48'));
 });
 
 test('adding QQ to its saved queue preserves Apple playback and source restoration retains quality', async () => {
@@ -332,4 +334,68 @@ test('switching source invalidates a pending Apple resolution before it can repl
     assert.equal(player.pendingKey, null);
     assert.equal(player.queue, null);
   } finally { globalThis.AmWrapper = original; }
+});
+
+
+test('AAC/OGG and multichannel FLAC tiers are native; all four Dolby tiers select JOC', () => {
+  for (const quality of ['AAC48', 'WEB', 'AAC192', 'OGG96', 'OGG192', 'QAI', 'Q360V1', 'Q360V2']) {
+    assert.equal(qq.playbackInfo(quality).playback, 'native', quality);
+  }
+  for (const quality of ['DA', 'DAEAC3', 'DA448', 'DA1500']) {
+    assert.equal(qq.playbackInfo(quality).playback, 'joc', quality);
+    assert.equal(qq.playbackInfo(quality, { codec: 'ac-4' }).playback, 'download', quality);
+  }
+  for (const quality of ['NAC', 'DTS', 'DTSX', 'RA360']) {
+    assert.equal(qq.playbackInfo(quality, { codec: 'flac' }).playback, 'download', quality);
+  }
+  assert.equal(qq.playbackInfo('Q360V1', { codec: 'ac-4' }).playback, 'download');
+  assert.equal(qq.playbackInfo('QAI', { codec: 'ec-3' }).playback, 'joc');
+});
+
+test('QQ rows keep downloads when codecs or browser capabilities prevent playback', () => {
+  const data = { qualities: ['NAC', 'DTS', 'DTSX', 'RA360', 'DA', 'OGG96', 'AAC48', 'QAI'].map((quality) => ({
+    quality, available: true, sizeBytes: 1024, ...(quality === 'DA' ? { codec: 'ac-4' } : {}),
+  })) };
+  const rows = qq.qualityRows(data, dto.id, (info) => detectQqModes(info, { canPlayType: (mime) => mime.startsWith('audio/mp4') ? 'maybe' : '' }));
+  for (const row of rows.filter((row) => row.available)) {
+    assert.ok(row.downloadUrl);
+    assert.equal(row.playable, row.quality === 'AAC48', row.quality);
+    assert.equal(Object.hasOwn(row, 'playUrl'), row.playable);
+  }
+});
+
+test('QQ JOC capability detection is independent of Apple decryption and honors binaural settings', () => {
+  const saved = { Worker: globalThis.Worker, AudioContext: globalThis.AudioContext, AmDecrypt: globalThis.AmDecrypt };
+  globalThis.Worker = function Worker() {};
+  globalThis.AudioContext = function AudioContext() {};
+  globalThis.AmDecrypt = undefined;
+  try {
+    useJocSettings({ get: () => ({ mode: 'binaural' }) });
+    assert.deepEqual(detectQqModes(qq.playbackInfo('DA448')), ['jocbin', 'joc2']);
+    useJocSettings({ get: () => ({ mode: 'off' }) });
+    assert.deepEqual(detectQqModes(qq.playbackInfo('DA1500')), ['joc2']);
+    globalThis.Worker = undefined;
+    assert.deepEqual(detectQqModes(qq.playbackInfo('DA')), []);
+  } finally { Object.assign(globalThis, saved); useJocSettings(null); }
+});
+
+test('download-only QQ entries cannot start audio', async () => {
+  for (const quality of ['NAC', 'DTS', 'DTSX', 'RA360']) {
+    const player = playerHarness();
+    await player.playQueue([qq.qualityEntry(qq.toTrack(dto), quality)]);
+    assert.equal(player.current, null);
+    assert.equal(player.audio.src, undefined);
+    assert.ok(player.error);
+  }
+});
+
+test('queue repeats preserve an actual payload override when changing quality', async () => {
+  const player = playerHarness();
+  const track = qq.toTrack(dto);
+  await player.playQueue([qq.entryOf(track)]);
+  await player.play(qq.qualityItem(track, 'Q360V1', { codec: 'vorbis', contentType: 'audio/ogg' }));
+  await player.playAt(0);
+  assert.equal(player.current.codec, 'vorbis');
+  assert.equal(player.current.contentType, 'audio/ogg');
+  assert.equal(player.current.playback, 'native');
 });

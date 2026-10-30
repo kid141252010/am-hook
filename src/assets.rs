@@ -81,6 +81,7 @@ pub static ASSETS: &[Asset] = &[
     // JOC 对象渲染（E-AC-3 Dolby Atmos -> Speaker 2.0 / 双耳）：Worker 与渲染器（crates/joc-wasm 编译产物），
     // 以及双耳用的 HRTF 场（约克大学 SADIE II 数据库，Apache-2.0，见 JOC-NOTICE.md）
     asset!("/assets/joc-decode-worker.js", JS, "joc-decode-worker.js"),
+    asset!("/assets/qq-joc-input.mjs", JS, "qq-joc-input.mjs"),
     asset!("/assets/joc.wasm", WASM, "joc.wasm"),
     asset!("/assets/joc-hrtf-D1.jochrtf", BIN, "joc-hrtf-D1.jochrtf"),
     asset!("/assets/joc-hrtf-D2.jochrtf", BIN, "joc-hrtf-D2.jochrtf"),

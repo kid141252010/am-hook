@@ -80,4 +80,4 @@ jobs:
       - name: Run QQ source tests
         # QQ DTOs, lyric priority, local favorites and separate source queues; offline
         if: runner.os == 'Linux'
-        run: node --test tests/qq_source.mjs
+        run: node --test tests/qq_source.mjs tests/qq_joc_input.mjs

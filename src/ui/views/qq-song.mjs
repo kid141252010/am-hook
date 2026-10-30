@@ -49,13 +49,14 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
   }
 
   function playQuality(quality) {
-    if (!track || !rows.find((row) => row.quality === quality)?.available) return;
+    const row = rows.find((row) => row.quality === quality);
+    if (!track || !row?.playable) return;
     if (active(quality)) { player.toggle(); return; }
-    player.play(qq.qualityItem(track, quality));
+    player.play(qq.qualityItem(track, quality, row));
   }
 
   function syncPlaying() {
-    $('play-best').disabled = !track || !rows.find((row) => row.quality === 'HQ')?.available;
+    $('play-best').disabled = !track || !rows.find((row) => row.quality === 'HQ')?.playable;
     $('play-best').textContent = t(active('HQ') && playing() ? 'song.pause' : 'song.play');
     for (const node of $('variant-list').children) {
       const current = active(node.dataset.quality);
@@ -75,19 +76,28 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
       const spec = [format,
         row.sizeBytes > 0 ? t('qq.sizeMb', { size: (row.sizeBytes / 1_000_000).toFixed(2) }) : '',
         !row.available ? t('qq.unavailable') : ''].filter(Boolean).join(' · ');
-      const node = el('div', { className: `variant qq-quality${row.available ? '' : ' unavailable'}` },
+      const label = t(`qq.quality.${row.quality}.label`);
+      const node = el('div', { className: `variant qq-quality${row.available ? row.playable ? '' : ' unsupported' : ' unavailable'}` },
         el('div', { className: 'variant-main' },
-          el('div', { className: 'variant-name', textContent: row.quality }),
+          el('div', { className: 'variant-name' }, el('span', { textContent: label }),
+            ...(row.available && !row.playable ? [el('span', { className: 'variant-tag warn', textContent: t('row.downloadOnly'),
+              title: t('row.unsupportedTitle', { codecs: row.codec, hint: t('player.hintDownload') }) })] : [])),
+          el('div', { className: 'qq-quality-tip', textContent: t(`qq.quality.${row.quality}.tip`) }),
           el('div', { className: 'variant-spec', textContent: spec })));
       node.dataset.quality = row.quality;
       node.setAttribute('aria-disabled', String(!row.available));
       if (row.available) {
-        const play = el('button', { className: 'song-reparse', type: 'button', disabled: !track, textContent: t('qq.playQuality') });
-        play.setAttribute('aria-label', t('qq.playQualityAria', { quality: row.quality }));
-        play.addEventListener('click', () => playQuality(row.quality));
+        const actions = el('div', { className: 'qq-quality-actions' });
+        if (row.playable) {
+          const play = el('button', { className: 'song-reparse', type: 'button', disabled: !track, textContent: t('qq.playQuality') });
+          play.setAttribute('aria-label', t('qq.playQualityAria', { quality: label }));
+          play.addEventListener('click', () => playQuality(row.quality));
+          actions.append(play);
+        }
         const download = el('a', { className: 'song-reparse qq-quality-download', href: row.downloadUrl, download: '', textContent: t('qq.downloadQuality') });
-        download.setAttribute('aria-label', t('qq.downloadQualityAria', { quality: row.quality }));
-        node.append(play, download);
+        download.setAttribute('aria-label', t('qq.downloadQualityAria', { quality: label }));
+        actions.append(download);
+        node.append(actions);
       }
       return node;
     }));

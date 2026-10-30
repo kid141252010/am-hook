@@ -91,6 +91,22 @@
     return modes;
   }
 
+  /** QQ files are unencrypted: JOC only needs the renderer, native files use HTMLAudio capabilities. */
+  function detectQqModes(item, audio) {
+    if (item.playback === 'download') return [];
+    if (item.playback === 'joc') {
+      if (!global.Worker || !global.WebAssembly || !(global.AudioContext || global.webkitAudioContext)) return [];
+      return jocSettings().mode === 'binaural' ? ['jocbin', 'joc2'] : ['joc2'];
+    }
+    audio ||= global.document?.createElement('audio');
+    return !audio?.canPlayType || audio.canPlayType(item.contentType || 'audio/mpeg') ? ['native'] : [];
+  }
+
+  const loadQq = () => typeof module !== 'undefined' && module.exports
+    ? import('./sources/qq.mjs') : import('/assets/sources/qq.mjs');
+  const loadQqJocInput = () => typeof module !== 'undefined' && module.exports
+    ? import('./qq-joc-input.mjs') : import('/assets/qq-joc-input.mjs');
+
   function detectMode(codecs) {
     return detectModes(codecs)[0] || null;
   }
@@ -337,11 +353,12 @@
     if (entry.source === 'qq') {
       if (!/^[0-9A-Za-z]{1,32}$/.test(entry.track)) throw new Error('Invalid QQ ID');
       const quality = entry.quality ?? 'HQ';
-      if (!['HQ', 'SQ', 'WEB', 'NAC', 'RS'].includes(quality)) throw new Error('Invalid QQ quality');
-      return { ...entry, quality, source: 'qq', key: trackKey(entry), id: `qq:${entry.track}:${quality}`,
+      const qq = await loadQq();
+      qq.qualityId(quality);
+      return { ...entry, ...qq.playbackInfo(quality, entry), quality, source: 'qq', key: trackKey(entry), id: `qq:${entry.track}:${quality}`,
         href: `/qq-song/${entry.track}`, title: entry.name,
         streamUrl: `/qq/song/${entry.track}/play${entry.quality === undefined ? '' : `?quality=${quality}`}`,
-        label: `QQ · ${quality}`, variants: [] };
+        downloadUrl: qq.downloadUrl(entry.track, quality), label: `QQ · ${quality}`, variants: [] };
     }
     const { variants } = await global.AmWrapper.songMaster(entry.track);
     const best = sortVariants(variants).find((v) => detectMode(v.codecs));
@@ -771,12 +788,12 @@
       this.clipped = false;
     }
 
-    async load(url) {
+    async load(url, openTrack = (path, signal) => global.AmDecrypt.openTrack(path, signal)) {
       const gen = this.generation;
       await this.started;
       if (gen !== this.generation) throw new DOMException('stale', 'AbortError');
       this.controller = new AbortController();
-      this.playlist = await global.AmDecrypt.openTrack(url, this.controller.signal);
+      this.playlist = await openTrack(url, this.controller.signal);
       if (gen !== this.generation) throw new DOMException('stale', 'AbortError');
       this.duration = this.playlist.duration;
       this.decoder = new JocDecoder();
@@ -1999,7 +2016,7 @@
         if (pcm && joc.gain !== pcm.gainDb) pcm.setGain(joc.gain);
         // 还在选择播放方式（加载中）时，方式或 HRTF 变了就按新设置重新开始
         if (this.attempting && (joc.mode !== previous || reconfigure)) { this.replay(); return; }
-        if (pcm && joc.mode !== 'off') {
+        if (pcm && (joc.mode !== 'off' || c.source === 'qq')) {
           if (reconfigure) {
             this.jocFallback = false;
             this.pcm.clipped = false;
@@ -2700,7 +2717,8 @@
       if (this.queue && trackKey(item) !== trackKey(this.queue.entries[this.queue.pos])) this.clearQueue();
       if (item.source === 'qq' && this.queue?.entries[this.queue.pos]) {
         // Keep the selected quality when this entry repeats or its source context is restored.
-        this.queue.entries[this.queue.pos].quality = item.quality;
+        Object.assign(this.queue.entries[this.queue.pos], { quality: item.quality, playback: item.playback,
+          codec: item.codec, codecs: item.codecs, contentType: item.contentType });
       }
       return this.start(item);
     }
@@ -2893,7 +2911,7 @@
       this.jocMode = jocSettings().mode;
       this.jocStale = false;
       this.jocFallback = false;
-      const modes = item.source === 'qq' ? ['native'] : detectModes(item.codecs);
+      const modes = item.source === 'qq' ? detectQqModes(item, this.audio) : detectModes(item.codecs);
       if (!modes.length) {
         this.showError(() => t('player.errorCodec', { codecs: item.codecs, hint: fallbackHint() }));
         return;
@@ -2994,12 +3012,18 @@
             onClip: () => this.showError(() => t('player.jocClip')),
           });
         }
-        this.pcm.gain.gain.value = this.audio.volume;
-        await this.pcm.load(item.m3u8Url);
+        const pcm = this.pcm;
+        pcm.gain.gain.value = this.audio.volume;
+        const openTrack = item.source === 'qq' ? async (url, signal) => {
+          const { openQqJocTrack } = await loadQqJocInput();
+          return openQqJocTrack(url, signal);
+        } : undefined;
+        await pcm.load(item.source === 'qq' ? item.downloadUrl : item.m3u8Url, openTrack);
         if (token !== this.playToken) return;
-        this.current.duration = this.pcm.duration;
-        if (resumeAt > 0) await this.pcm.seek(resumeAt);
-        if (!paused) await this.pcm.play();
+        this.current.duration = pcm.duration;
+        if (resumeAt > 0) await pcm.seek(resumeAt);
+        if (token !== this.playToken) return;
+        if (!paused) await pcm.play();
         return;
       }
       this.mse.onRecover = () => this.showError('');
@@ -3183,7 +3207,7 @@
     }
   }
 
-  const api = { AmPlayer, Marquee, artistNodes, qualityBadge, qualityIcon, segmentAt, formatTime, detectMode, detectModes, mimeFor, useJocSettings, trackKey, sourceOf };
+  const api = { AmPlayer, Marquee, artistNodes, qualityBadge, qualityIcon, segmentAt, formatTime, detectMode, detectModes, detectQqModes, mimeFor, useJocSettings, trackKey, sourceOf };
   if (typeof module !== 'undefined' && module.exports) module.exports = { ...api, MseEngine, JocEngine, JocLiveEngine, sortVariants };
   else global.AmHook = api;
 })(typeof window !== 'undefined' ? window : globalThis);

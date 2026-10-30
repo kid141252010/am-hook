@@ -5,7 +5,26 @@ export { trackKey } from './track.mjs';
 const MID = /^[0-9A-Za-z]{1,32}$/;
 export const enabled = () => globalThis.window?.AM_HOOK_HOST?.qqEnabled === true;
 const mid = (id) => { if (!['string', 'number'].includes(typeof id) || !MID.test(String(id))) throw new Error('Invalid QQ ID'); return String(id); };
-export const QUALITY_IDS = ['HQ', 'SQ', 'WEB', 'NAC', 'RS'];
+export const QUALITY_IDS = ['MP3128', 'AAC48', 'WEB', 'AAC192', 'OGG96', 'OGG192', 'HQ', 'NAC',
+  'SQ', 'RS', 'QAI', 'Q360V1', 'Q360V2', 'RA360', 'DTS', 'DTSX', 'DA', 'DAEAC3', 'DA448', 'DA1500'];
+const DEFAULT_CODECS = {
+  MP3128: 'mp3', AAC48: 'aac', WEB: 'aac', AAC192: 'aac', OGG96: 'vorbis', OGG192: 'vorbis', HQ: 'mp3', NAC: 'nac',
+  SQ: 'flac', RS: 'flac', QAI: 'flac', Q360V1: 'flac', Q360V2: 'flac', RA360: 'unknown', DTS: 'dts', DTSX: 'dtsx',
+  DA: 'ec-3', DAEAC3: 'ec-3', DA448: 'ec-3', DA1500: 'ec-3',
+};
+const CONTENT_TYPES = {
+  mp3: 'audio/mpeg', aac: 'audio/mp4; codecs="mp4a.40.2"', flac: 'audio/flac', vorbis: 'audio/ogg; codecs="vorbis"',
+  opus: 'audio/ogg; codecs="opus"', pcm: 'audio/wav', 'ec-3': 'audio/mp4; codecs="ec-3"',
+};
+/** Actual codec wins over the tier's usual payload; tiers without decoders stay download-only. */
+export function playbackInfo(quality = 'HQ', row = {}) {
+  qualityId(quality);
+  const codec = typeof row.codec === 'string' ? row.codec : DEFAULT_CODECS[quality];
+  const playback = ['NAC', 'DTS', 'DTSX', 'RA360'].includes(quality) ? 'download'
+    : codec === 'ec-3' ? 'joc' : Object.hasOwn(CONTENT_TYPES, codec) ? 'native' : 'download';
+  return { playback, codec, codecs: codec, contentType: typeof row.contentType === 'string' ? row.contentType
+    : CONTENT_TYPES[codec] || 'application/octet-stream' };
+}
 export function qualityId(value = 'HQ') {
   if (!QUALITY_IDS.includes(value)) throw new Error('Invalid QQ quality');
   return value;
@@ -30,12 +49,12 @@ export function toTrack(dto) {
 export function entryOf(track) {
   return withIdentity({ ...track, track: track.id, artwork: artUrl(track.artwork, 600) });
 }
-export function qualityEntry(track, quality) {
-  return { ...entryOf(track), quality: qualityId(quality) };
+export function qualityEntry(track, quality, row) {
+  return { ...entryOf(track), quality: qualityId(quality), ...playbackInfo(quality, row) };
 }
-export function qualityItem(track, quality) {
-  return { ...qualityEntry(track, quality), id: `qq:${track.id}:${quality}`, title: track.name,
-    streamUrl: playUrl(track.id, quality), label: `QQ · ${quality}`, variants: [] };
+export function qualityItem(track, quality, row) {
+  return { ...qualityEntry(track, quality, row), id: `qq:${track.id}:${quality}`, title: track.name,
+    streamUrl: playUrl(track.id, quality), downloadUrl: downloadUrl(track.id, quality), label: `QQ · ${quality}`, variants: [] };
 }
 async function request(path, signal) {
   const response = await fetch(path, { signal });
@@ -47,14 +66,17 @@ export async function searchSongs(q, { limit = 30, offset = 0, signal } = {}) {
   return { songs: (data.songs || []).map(toTrack), total: data.total || 0 };
 }
 export async function song(id, signal) { return toTrack(await request(`/qq/song/${mid(id)}`, signal)); }
-export function qualityRows(data, id) {
+export function qualityRows(data, id, detect = globalThis.window?.AmHook?.detectQqModes) {
   const rows = Array.isArray(data?.qualities) ? data.qualities : [];
   return QUALITY_IDS.map((quality) => {
     const row = rows.find((item) => item?.quality === quality);
     const sizeBytes = Number.isSafeInteger(row?.sizeBytes) && row.sizeBytes >= 0 ? row.sizeBytes : null;
     const available = row?.available === true && sizeBytes > 0;
-    return { quality, available, sizeBytes, format: typeof row?.format === 'string' ? row.format : '',
-      ...(available ? { playUrl: playUrl(id, quality), downloadUrl: downloadUrl(id, quality) } : {}) };
+    const info = playbackInfo(quality, row);
+    const playable = available && (detect ? detect(info).length > 0 : info.playback !== 'download');
+    return { quality, available, playable, sizeBytes, ...info, format: typeof row?.format === 'string' ? row.format : '',
+      ...(available ? { downloadUrl: downloadUrl(id, quality) } : {}),
+      ...(playable ? { playUrl: playUrl(id, quality) } : {}) };
   });
 }
 export async function qualities(id, signal) {
