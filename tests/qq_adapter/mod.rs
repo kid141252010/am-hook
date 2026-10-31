@@ -370,6 +370,17 @@ fn ttml_keeps_timing_translation_and_agents_but_removes_credits_and_urls() {
     assert!(
         clean_ttml("<!DOCTYPE tt><tt><body><div><p begin=\"0\">x</p></div></body></tt>").is_none()
     );
+    assert!(
+        clean_ttml("<!dOcTyPe tt><tt><body><div><p begin=\"0\">x</p></div></body></tt>").is_none()
+    );
+    let child_lang =
+        clean_ttml("<tt><head xml:lang=\"fr\"/><body><div><p begin=\"0\">x</p></div></body></tt>")
+            .unwrap();
+    assert!(!child_lang.contains("xml:lang=\"fr\""));
+    let root_lang =
+        clean_ttml("<tt xml:lang=\"en\"><body><div><p begin=\"0\">x</p></div></body></tt>")
+            .unwrap();
+    assert!(root_lang.contains("<tt xml:lang=\"en\""));
     assert!(clean_ttml("not XML").is_none());
 }
 #[test]
@@ -377,8 +388,8 @@ fn lrc_fallback_handles_headers_offsets_repeated_stamps_and_xml_escaping() {
     let text = "[by:https://example.invalid/private]\n[offset:100]\n[00:01.00][00:03.00]A & B\n[00:05.0]Next";
     let cleaned = lrc_ttml(text, None).unwrap();
     assert!(!cleaned.contains("example.invalid"));
-    assert!(cleaned.contains("begin=\"1.100\" end=\"3.100\">A &amp; B"));
-    assert!(cleaned.contains("begin=\"3.100\" end=\"5.100\">A &amp; B"));
+    assert!(cleaned.contains("begin=\"0.900\" end=\"2.900\">A &amp; B"));
+    assert!(cleaned.contains("begin=\"2.900\" end=\"4.900\">A &amp; B"));
     assert!(lrc_ttml("[by:someone]\nno timestamps", None).is_none());
 }
 #[test]

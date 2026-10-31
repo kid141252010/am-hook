@@ -45,7 +45,7 @@ fn unavailable() -> QqError {
 }
 fn network(error: reqwest::Error) -> QqError {
     // reqwest Display otherwise includes the full private API URL.
-    let _ = error.without_url();
+    tracing::warn!(error = %error.without_url(), "qq network request failed");
     unavailable()
 }
 pub fn valid_mid(mid: &str) -> bool {
@@ -108,10 +108,10 @@ impl<T: Clone> Cache<T> {
     }
     fn get(&self, key: &str) -> Option<T> {
         let mut entries = self.entries.lock().unwrap();
-        if entries
+        let valid = entries
             .get(key)
-            .is_some_and(|(time, _)| time.elapsed() < self.ttl)
-        {
+            .is_some_and(|(expires, _)| Instant::now() < *expires);
+        if valid {
             entries.get(key).map(|(_, value)| value.clone())
         } else {
             entries.pop(key);
@@ -119,10 +119,13 @@ impl<T: Clone> Cache<T> {
         }
     }
     fn put(&self, key: String, value: T) {
+        self.put_with_ttl(key, value, self.ttl);
+    }
+    fn put_with_ttl(&self, key: String, value: T, ttl: Duration) {
         self.entries
             .lock()
             .unwrap()
-            .put(key, (Instant::now(), value));
+            .put(key, (Instant::now() + ttl, value));
     }
 }
 pub struct Qq {
@@ -227,10 +230,12 @@ impl Qq {
             .or_else(|| {
                 let pic = album.get("picUrl")?.as_str()?;
                 cdn_url(pic)?;
-                Regex::new(r"T002(?:R\d+x\d+)?M000([0-9A-Za-z]{1,32})(?:_\d+)?\.")
-                    .ok()?
-                    .captures(pic)
-                    .map(|c| c[1].to_owned())
+                static RE: OnceLock<Regex> = OnceLock::new();
+                RE.get_or_init(|| {
+                    Regex::new(r"T002(?:R\d+x\d+)?M000([0-9A-Za-z]{1,32})(?:_\d+)?\.").unwrap()
+                })
+                .captures(pic)
+                .map(|c| c[1].to_owned())
             })
             .or_else(|| album.get("id").map(string).filter(|s| valid_mid(s)))
             .unwrap_or_else(|| id.clone());
@@ -239,8 +244,8 @@ impl Qq {
             .and_then(Value::as_str)
             .filter(|url| cdn_url(url).is_some())
             .map(|url| {
-                Regex::new(r"T002(?:R\d+x\d+)?M000")
-                    .unwrap()
+                static RE: OnceLock<Regex> = OnceLock::new();
+                RE.get_or_init(|| Regex::new(r"T002(?:R\d+x\d+)?M000").unwrap())
                     .replace(url, "T002R{w}x{h}M000")
                     .into_owned()
             })
@@ -291,11 +296,14 @@ impl Qq {
         if let Some(song) = self.songs.get(mid) {
             return Ok(song);
         }
-        let data = self.info_data(mid).await?;
-        self.song_from_info(mid, &data)
+        self.info_data(mid).await?;
+        self.songs.get(mid).ok_or_else(missing)
     }
     async fn info_data(&self, mid: &str) -> ApiResult<Value> {
         if let Some(data) = self.infos.get(mid) {
+            if self.songs.get(mid).is_none() {
+                self.song_from_info(mid, &data)?;
+            }
             return Ok(data);
         }
         let data = self
@@ -1088,8 +1096,9 @@ fn xml(text: &str) -> String {
         .replace('"', "&quot;")
 }
 fn clean_text(text: &str) -> String {
-    Regex::new(r#"(?i)https?://[^\s<>"']+"#)
-        .unwrap()
+    static RE_URL: OnceLock<Regex> = OnceLock::new();
+    RE_URL
+        .get_or_init(|| Regex::new(r#"(?i)https?://[^\s<>"']+"#).unwrap())
         .replace_all(text, "")
         .into_owned()
 }
@@ -1099,18 +1108,31 @@ fn wrap(body: &str, word: bool) -> String {
 /// Rebuild the renderable body with a strict tag / attribute allowlist. No credit
 /// comments, external entities, URLs, credit metadata, styles or external resources.
 fn clean_ttml(text: &str) -> Option<String> {
-    if text.len() > 2_000_000 || text.contains("<!DOCTYPE") || text.contains("<!ENTITY") {
+    static UNSAFE: OnceLock<Regex> = OnceLock::new();
+    if text.len() > 2_000_000
+        || UNSAFE
+            .get_or_init(|| Regex::new(r"(?i)<!DOCTYPE|<!ENTITY").unwrap())
+            .is_match(text)
+    {
         return None;
     }
-    let text = Regex::new(r"(?s)<!--.*?-->").unwrap().replace_all(text, "");
-    let body = Regex::new(r"(?s)<body\b[^>]*>.*?</body>")
-        .unwrap()
+    static COMMENTS: OnceLock<Regex> = OnceLock::new();
+    let text = COMMENTS
+        .get_or_init(|| Regex::new(r"(?s)<!--.*?-->").unwrap())
+        .replace_all(text, "");
+    static BODY: OnceLock<Regex> = OnceLock::new();
+    let body = BODY
+        .get_or_init(|| Regex::new(r"(?s)<body\b[^>]*>.*?</body>").unwrap())
         .find(&text)?
         .as_str();
-    let tags = Regex::new(r"(?s)<[^>]*>|[^<]+").unwrap();
-    let tag = Regex::new(r"^<(/?)(body|div|p|span|br)\b([^>]*)>$").unwrap();
-    let attrs = Regex::new(r#"([\w:]+)\s*=\s*["']([^"']*)["']"#).unwrap();
-    let time = Regex::new(r"^\d+(?::\d+){0,2}(?:\.\d+)?$").unwrap();
+    static TAGS: OnceLock<Regex> = OnceLock::new();
+    let tags = TAGS.get_or_init(|| Regex::new(r"(?s)<[^>]*>|[^<]+").unwrap());
+    static TAG: OnceLock<Regex> = OnceLock::new();
+    let tag = TAG.get_or_init(|| Regex::new(r"^<(/?)(body|div|p|span|br)\b([^>]*)>$").unwrap());
+    static ATTRS: OnceLock<Regex> = OnceLock::new();
+    let attrs = ATTRS.get_or_init(|| Regex::new(r#"([\w:]+)\s*=\s*["']([^"']*)["']"#).unwrap());
+    static TIME: OnceLock<Regex> = OnceLock::new();
+    let time = TIME.get_or_init(|| Regex::new(r"^\d+(?::\d+){0,2}(?:\.\d+)?$").unwrap());
     let mut out = String::new();
     for token in tags.find_iter(body) {
         let token = token.as_str();
@@ -1144,12 +1166,14 @@ fn clean_ttml(text: &str) -> Option<String> {
     if !out.contains("<p ") {
         return None;
     }
-    let word = Regex::new(r#"<span\b[^>]*\bbegin="#)
-        .unwrap()
+    static WORD: OnceLock<Regex> = OnceLock::new();
+    let word = WORD
+        .get_or_init(|| Regex::new(r#"<span\b[^>]*\bbegin="#).unwrap())
         .is_match(&out);
     let mut result = wrap(&out, word);
     // Agent types affect duet layout; keep those declarations without names/credits.
-    let agents = Regex::new(r#"<(?:ttm:)?agent\b[^>]*>"#).unwrap();
+    static AGENTS: OnceLock<Regex> = OnceLock::new();
+    let agents = AGENTS.get_or_init(|| Regex::new(r#"<(?:ttm:)?agent\b[^>]*>"#).unwrap());
     let mut head = String::new();
     for agent in agents.find_iter(&text) {
         let mut id = None;
@@ -1176,8 +1200,9 @@ fn clean_ttml(text: &str) -> Option<String> {
             1,
         );
     }
-    if let Some(lang) = Regex::new(r#"\bxml:lang=["']([A-Za-z0-9-]{1,35})["']"#)
-        .unwrap()
+    static LANG: OnceLock<Regex> = OnceLock::new();
+    if let Some(lang) = LANG
+        .get_or_init(|| Regex::new(r#"<tt\b[^>]*\bxml:lang=["']([A-Za-z0-9-]{1,35})["']"#).unwrap())
         .captures(&text)
     {
         result = result.replacen("<tt ", &format!("<tt xml:lang=\"{}\" ", &lang[1]), 1);
@@ -1202,9 +1227,11 @@ struct LyricLine {
     is_bg: bool,
 }
 fn lrc_lines(text: &str) -> Vec<LyricLine> {
-    let stamp = Regex::new(r"\[(\d+):(\d+(?:\.\d+)?)\]").unwrap();
-    let offset = Regex::new(r"\[offset:([+-]?\d+)\]")
-        .unwrap()
+    static STAMP: OnceLock<Regex> = OnceLock::new();
+    let stamp = STAMP.get_or_init(|| Regex::new(r"\[(\d+):(\d+(?:\.\d+)?)\]").unwrap());
+    static OFFSET: OnceLock<Regex> = OnceLock::new();
+    let offset = OFFSET
+        .get_or_init(|| Regex::new(r"\[offset:([+-]?\d+)\]").unwrap())
         .captures(text)
         .and_then(|c| c[1].parse::<f64>().ok())
         .unwrap_or(0.0);
@@ -1219,7 +1246,7 @@ fn lrc_lines(text: &str) -> Vec<LyricLine> {
             let (Ok(minutes), Ok(seconds)) = (c[1].parse::<f64>(), c[2].parse::<f64>()) else {
                 continue;
             };
-            let start = ((minutes * 60.0 + seconds) * 1000.0 + offset)
+            let start = ((minutes * 60.0 + seconds) * 1000.0 - offset)
                 .round()
                 .max(0.0) as u64;
             lines.push(LyricLine {
@@ -1241,9 +1268,10 @@ fn qrc_content(text: &str) -> String {
     // QQ leaves quotes inside LyricContent unescaped. Only a matching quote
     // followed by optional whitespace and /> ends the value, across newlines.
     // Clipped responses may omit that delimiter; retain their available content.
-    let envelope =
-        Regex::new(r#"(?s)\bLyricContent\s*=\s*(?:"(.*?)(?:"\s*/>|$)|'(.*?)(?:'\s*/>|$))"#)
-            .unwrap();
+    static ENVELOPE: OnceLock<Regex> = OnceLock::new();
+    let envelope = ENVELOPE.get_or_init(|| {
+        Regex::new(r#"(?s)\bLyricContent\s*=\s*(?:"(.*?)(?:"\s*/>|$)|'(.*?)(?:'\s*/>|$))"#).unwrap()
+    });
     let content = envelope.captures(text);
     content
         .as_ref()
@@ -1263,8 +1291,10 @@ fn qrc_lines(text: &str) -> Vec<LyricLine> {
     // parentheses, commas, and spaces. That is important for nested translations
     // such as `you((123,4)字(127,4))`.
     let text = qrc_content(text);
-    let line = Regex::new(r"^\[(\d+),(\d+)\]").unwrap();
-    let word = Regex::new(r"(.*?)\((\d+),(\d+)\)").unwrap();
+    static LINE: OnceLock<Regex> = OnceLock::new();
+    let line = LINE.get_or_init(|| Regex::new(r"^\[(\d+),(\d+)\]").unwrap());
+    static WORD: OnceLock<Regex> = OnceLock::new();
+    let word = WORD.get_or_init(|| Regex::new(r"(.*?)\((\d+),(\d+)\)").unwrap());
     let mut lines = Vec::new();
     for raw_line in text.split('\n') {
         let line_text = raw_line.trim();
@@ -1739,92 +1769,221 @@ fn converted_lyrics_with_context(raw: &Value, context: Option<LyricContext<'_>>)
     }
     candidates
 }
-async fn fetch_lyrics(qq: &Qq, mid: &str) -> ApiResult<Lyrics> {
-    let mut candidates = Vec::new();
-    let mut raw_lyrics = RawLyrics::default();
-    // Match the existing AMLL native API using QQ's identifier, never Apple ID.
-    let amll = qq
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LyricsSourceState {
+    Success,
+    None,
+    Failed,
+}
+struct LyricsSource<T> {
+    state: LyricsSourceState,
+    value: Option<T>,
+}
+
+async fn fetch_amll_lyrics(qq: &Qq, mid: &str) -> LyricsSource<String> {
+    let response = match qq
         .api
         .get(format!("{}/v1/lyrics/get", qq.amll))
         .query(&[("qqMusicId", &mid)])
         .send()
-        .await;
-    match amll {
-        Ok(response) if response.status().is_success() => {
-            if let Ok(raw) = response.json::<Value>().await {
-                if let Some(text) = raw
-                    .pointer("/data/lyrics")
-                    .and_then(Value::as_str)
-                    .and_then(clean_ttml)
-                {
-                    candidates.push(Lyric {
-                        source: "amll",
-                        text,
-                    });
-                }
-            }
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::debug!(error = %error.without_url(), "qq AMLL lyrics source failed");
+            return LyricsSource {
+                state: LyricsSourceState::Failed,
+                value: None,
+            };
         }
-        Err(e) => {
-            let _ = e.without_url();
-        }
-        _ => {}
+    };
+    if !response.status().is_success() {
+        tracing::debug!(status = %response.status(), "qq AMLL lyrics source failed");
+        return LyricsSource {
+            state: LyricsSourceState::Failed,
+            value: None,
+        };
     }
-    if let Ok(raw) = qq
+    let raw = match response.json::<Value>().await {
+        Ok(raw) => raw,
+        Err(error) => {
+            tracing::debug!(error = %error, "qq AMLL lyrics response decode failed");
+            return LyricsSource {
+                state: LyricsSourceState::Failed,
+                value: None,
+            };
+        }
+    };
+    let Some(raw) = raw.pointer("/data/lyrics").and_then(Value::as_str) else {
+        return LyricsSource {
+            state: LyricsSourceState::None,
+            value: None,
+        };
+    };
+    let Some(text) = clean_ttml(raw) else {
+        return LyricsSource {
+            state: LyricsSourceState::None,
+            value: None,
+        };
+    };
+    LyricsSource {
+        state: LyricsSourceState::Success,
+        value: Some(text),
+    }
+}
+
+async fn fetch_ttml_lyrics(qq: &Qq, mid: &str) -> LyricsSource<String> {
+    let raw = match qq
         .request(
             "/lyric/ttml",
             &[("platform", "qq".into()), ("mid", mid.to_owned())],
         )
         .await
     {
-        if let Some(text) = raw
-            .get("content")
-            .and_then(Value::as_str)
-            .and_then(clean_ttml)
-        {
-            candidates.push(Lyric {
-                source: "ttml",
-                text,
-            });
+        Ok(raw) => raw,
+        Err(_) => {
+            tracing::debug!("qq TTML lyrics source failed");
+            return LyricsSource {
+                state: LyricsSourceState::Failed,
+                value: None,
+            };
         }
+    };
+    let Some(content) = raw.get("content").and_then(Value::as_str) else {
+        return LyricsSource {
+            state: LyricsSourceState::None,
+            value: None,
+        };
+    };
+    let Some(text) = clean_ttml(content) else {
+        return LyricsSource {
+            state: LyricsSourceState::None,
+            value: None,
+        };
+    };
+    LyricsSource {
+        state: LyricsSourceState::Success,
+        value: Some(text),
     }
-    if let Ok(raw) = qq
+}
+
+async fn fetch_new_lyrics(qq: &Qq, mid: &str) -> LyricsSource<Value> {
+    let raw = match qq
         .request(
             "/lyric/new",
             &[("platform", "qq".into()), ("id", mid.to_owned())],
         )
         .await
     {
+        Ok(raw) => raw,
+        Err(_) => {
+            tracing::debug!("qq QRC lyrics source failed");
+            return LyricsSource {
+                state: LyricsSourceState::Failed,
+                value: None,
+            };
+        }
+    };
+    let raw = raw.get("data").cloned().unwrap_or(raw);
+    let has_lyrics = ["qrc", "qrctrans", "qrcroma", "lrc", "lrctrans"]
+        .iter()
+        .any(|key| field_text(&raw, key).is_some_and(|text| !text.trim().is_empty()));
+    LyricsSource {
+        state: if has_lyrics {
+            LyricsSourceState::Success
+        } else {
+            LyricsSourceState::None
+        },
+        value: has_lyrics.then_some(raw),
+    }
+}
+
+async fn fetch_lyrics(qq: &Qq, mid: &str) -> ApiResult<(Lyrics, Duration)> {
+    // Fetch all upstreams and the cold song context together. The context is only
+    // needed to filter QRC/LRC metadata, so a context failure does not fail lyrics.
+    let context = async {
+        if let Some(song) = qq.songs.get(mid) {
+            Some(song)
+        } else {
+            match qq.song(mid).await {
+                Ok(song) => Some(song),
+                Err(_) => {
+                    tracing::debug!("qq lyrics song context unavailable");
+                    None
+                }
+            }
+        }
+    };
+    let (amll, ttml, new, song) = tokio::join!(
+        fetch_amll_lyrics(qq, mid),
+        fetch_ttml_lyrics(qq, mid),
+        fetch_new_lyrics(qq, mid),
+        context,
+    );
+    let mut candidates = Vec::new();
+    let mut raw_lyrics = RawLyrics::default();
+    if let Some(text) = amll.value {
+        candidates.push(Lyric {
+            source: "amll",
+            text,
+        });
+    }
+    if let Some(text) = ttml.value {
+        candidates.push(Lyric {
+            source: "ttml",
+            text,
+        });
+    }
+    let mut new_state = new.state;
+    if let Some(raw) = new.value {
         // Lyrics can be requested before the song details page has populated the
         // song cache. Reuse the normal song/info path on a cold cache so the
         // metadata-aware filters see the same title and artists. A failed info
         // request only drops the context; the lyric candidates remain usable.
-        let song = match qq.songs.get(mid) {
-            Some(song) => Some(song),
-            None => qq.song(mid).await.ok(),
-        };
         let context = song.as_ref().map(|song| LyricContext {
             name: &song.name,
             artists: &song.artists,
         });
-        let raw = raw.get("data").unwrap_or(&raw);
-        raw_lyrics.qrc = field_text(raw, "qrc")
+        raw_lyrics.qrc = field_text(&raw, "qrc")
             .filter(|text| !text.trim().is_empty())
             .map(str::to_owned);
-        raw_lyrics.trans = field_text(raw, "qrctrans")
+        raw_lyrics.trans = field_text(&raw, "qrctrans")
             .filter(|text| !text.trim().is_empty())
             .map(str::to_owned);
-        raw_lyrics.roma = field_text(raw, "qrcroma")
+        raw_lyrics.roma = field_text(&raw, "qrcroma")
             .filter(|text| !text.trim().is_empty())
             .map(str::to_owned);
-        candidates.extend(converted_lyrics_with_context(raw, context));
+        let candidate_count = candidates.len();
+        candidates.extend(converted_lyrics_with_context(&raw, context));
+        if candidates.len() == candidate_count {
+            new_state = LyricsSourceState::None;
+        }
     }
-    Ok(Lyrics {
-        candidates,
-        raw_qrc: raw_lyrics.qrc.is_some(),
-        raw_trans: raw_lyrics.trans.is_some(),
-        raw_roma: raw_lyrics.roma.is_some(),
-        raw: raw_lyrics,
-    })
+    let states = [amll.state, ttml.state, new_state];
+    if states
+        .iter()
+        .all(|state| *state == LyricsSourceState::Failed)
+    {
+        return Err(unavailable());
+    }
+    let ttl = if states.contains(&LyricsSourceState::Failed) {
+        Duration::from_secs(300)
+    } else if states.iter().all(|state| *state == LyricsSourceState::None) {
+        Duration::from_secs(3600)
+    } else {
+        Duration::from_secs(604800)
+    };
+    Ok((
+        Lyrics {
+            candidates,
+            raw_qrc: raw_lyrics.qrc.is_some(),
+            raw_trans: raw_lyrics.trans.is_some(),
+            raw_roma: raw_lyrics.roma.is_some(),
+            raw: raw_lyrics,
+        },
+        ttl,
+    ))
 }
 async fn lyrics(
     State(state): State<Arc<AppState>>,
@@ -1835,10 +1994,8 @@ async fn lyrics(
     if let Some(data) = qq.lyrics.get(&mid) {
         return Ok(Json(data));
     }
-    let data = fetch_lyrics(qq, &mid).await?;
-    if !data.candidates.is_empty() || data.raw_qrc || data.raw_trans || data.raw_roma {
-        qq.lyrics.put(mid, data.clone());
-    }
+    let (data, ttl) = fetch_lyrics(qq, &mid).await?;
+    qq.lyrics.put_with_ttl(mid, data.clone(), ttl);
     Ok(Json(data))
 }
 async fn raw_lyrics(
@@ -1852,10 +2009,8 @@ async fn raw_lyrics(
     let data = if let Some(data) = qq.lyrics.get(&mid) {
         data
     } else {
-        let data = fetch_lyrics(qq, &mid).await?;
-        if !data.candidates.is_empty() || data.raw_qrc || data.raw_trans || data.raw_roma {
-            qq.lyrics.put(mid.clone(), data.clone());
-        }
+        let (data, ttl) = fetch_lyrics(qq, &mid).await?;
+        qq.lyrics.put_with_ttl(mid.clone(), data.clone(), ttl);
         data
     };
     let text = match kind {
