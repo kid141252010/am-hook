@@ -5,15 +5,19 @@ import { createRequire } from 'node:module';
 import * as qq from '../src/ui/sources/qq.mjs';
 const { AmPlayer, qualityBadge, useJocSettings } = createRequire(import.meta.url)('../src/ui/player.js');
 
-const original = Object.fromEntries(['fetch', 'AmWrapper', 'AmDecrypt', 'MediaSource', 'Worker', 'AudioContext']
+const original = Object.fromEntries(['fetch', 'AmWrapper', 'AmDecrypt', 'MediaSource', 'Worker', 'AudioContext', 'window', 'document']
   .map((key) => [key, globalThis[key]]));
 beforeEach(() => {
   qq.setCurrentQuality('HQ');
+  qq.clearMimeSupportCache();
   globalThis.AmWrapper = { songMaster() { assert.fail('QQ must not request an Apple master'); } };
   globalThis.AmDecrypt = undefined;
+  globalThis.window = {};
+  globalThis.document = { createElement: () => ({ canPlayType: () => 'probably' }) };
+  globalThis.MediaSource = { isTypeSupported: () => true };
   globalThis.fetch = async () => assert.fail('variants must be fetched lazily');
 });
-afterEach(() => { Object.assign(globalThis, original); qq.setCurrentQuality('HQ'); useJocSettings(null); });
+afterEach(() => { Object.assign(globalThis, original); qq.clearMimeSupportCache(); qq.setCurrentQuality('HQ'); useJocSettings(null); });
 
 // Only DOM primitives used by the production quality panel; all rendering and events are real.
 class Element {
@@ -68,9 +72,9 @@ const settle = () => new Promise(setImmediate);
 
 test('QQ variants retain available native/JOC formats and actual payload metadata only', () => {
   const list = variants();
-  assert.deepEqual(list.map((v) => v.quality), ['HQ', 'SQ', 'Q360V1', 'DAEAC3']);
+  assert.deepEqual(list.map((v) => v.quality), ['HQ', 'SQ', 'Q360V1', 'DA', 'DAEAC3']);
   assert.ok(list.every((v) => v.group_id === v.quality && v.source === 'qq'));
-  assert.deepEqual(list.map((v) => v.playback), ['native', 'native', 'native', 'joc']);
+  assert.deepEqual(list.map((v) => v.playback), ['native', 'native', 'native', 'native', 'joc']);
   assert.equal(list[1].format, 'FLAC 16-bit / 44.1 kHz');
   assert.equal(list[2].codec, 'vorbis');
   assert.equal(list[2].contentType, 'audio/ogg');
@@ -112,12 +116,12 @@ test('QQ badge opens the shared panel, fetches once and marks the current qualit
   await settle();
   assert.deepEqual(calls, ['/qq/song/song/qualities']);
   const options = player.qualityPanel.all('quality-option');
-  assert.equal(options.length, 4);
+  assert.equal(options.length, 5);
   assert.equal(options[0].getAttribute('aria-current'), 'true');
   assert.ok(options[0].check);
   assert.match(options[1].textContent, /QQ · SQFLAC 16-bit \/ 44.1 kHz/);
   assert.equal(options[0].disabled, false); // No AmDecrypt / MSE needed for native QQ.
-  assert.equal(options[3].disabled, true); // JOC requires Worker + Web Audio.
+  assert.equal(options[4].disabled, true); // JOC requires Worker + Web Audio.
   assert.equal(player.current.variants, player.variantCache.get('qq:song').variants);
   player.closeQualityPanel();
   player.openQualityPanel();
@@ -179,12 +183,12 @@ test('panel selection resumes native QQ at the same time and retains queue order
 test('switching a QQ variant uses its API codec override and rejects unsupported choices', async () => {
   const player = playerHarness();
   await player.playQueue([qq.entryOf(track())]);
-  await player.switchVariant(variants()[2]);
+  await player.switchVariant(variants().find((variant) => variant.quality === 'Q360V1'));
   assert.equal(player.current.codec, 'vorbis');
   assert.equal(player.current.contentType, 'audio/ogg');
   assert.equal(player.audio.src, '/qq/song/song/play?quality=Q360V1');
   const current = player.current;
-  await player.switchVariant(qq.qualityVariant('DA'));
+  await player.switchVariant(qq.qualityVariant('NAC'));
   assert.equal(player.current, current);
   assert.equal(qq.currentQuality, 'Q360V1');
 });

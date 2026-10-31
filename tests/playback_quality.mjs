@@ -5,7 +5,10 @@ import { PLAYBACK_QUALITIES, pickAppleVariant } from '../src/ui/playback-quality
 import { pickDefaultQuality, qualityRows } from '../src/ui/sources/qq.mjs';
 
 const qqTiers = ['RS', 'SQ', 'DAEAC3', 'HQ', 'WEB'];
-const qqRows = qualityRows({ qualities: qqTiers.map((quality) => ({ quality, available: true, sizeBytes: 100 })) }, 'track', () => ['supported']);
+const browser = { window: {}, MediaSource: { isTypeSupported: () => true },
+  document: { createElement: () => ({ canPlayType: () => 'probably' }) } };
+const qqRows = qualityRows({ qualities: qqTiers.map((quality) => ({ quality, available: true, sizeBytes: 100 })) },
+  'track', () => ['supported'], browser);
 
 test('QQ selects each preferred tier and every successive fallback, including Hi-Res → SQ', () => {
   for (const [i, preference] of PLAYBACK_QUALITIES.entries()) {

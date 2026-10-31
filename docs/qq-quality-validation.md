@@ -22,10 +22,10 @@
 | 空间 | RA360 | 360 Reality Audio | 360 Reality Audio | `size_360ra` 数组；两个样本均为 0 | download |
 | 空间 | DTS | DTS 5.1 | DTS 5.1 | `size_dts`；两个样本均为 0 | download |
 | 空间 | DTSX | DTS:X | DTS:X | info 字段待定，逐档探测；两个样本均为 0 | download |
-| 杜比 | DA | 杜比全景声 | Dolby Atmos | `size_dolby`，`.mp4` AC-4 Dolby Atmos（`ac-4` / `dac4`） | download |
+| 杜比 | DA | 杜比全景声 | Dolby Atmos | `size_dolby`，`.mp4` AC-4 Dolby Atmos（`ac-4` / `dac4`） | native / download（运行时） |
 | 杜比 | DAEAC3 | 杜比 EAC3 | Dolby EAC3 | 与 DA / `size_dolby` 同大小，`.mp4` E-AC-3 JOC（`ec-3` / `dec3`） | joc |
-| 杜比 | DA448 | 杜比 AJOC 448 | Dolby AJOC 448 | `size_new` 的一槽，`.mp4` AC-4 A-JOC 448 kbps（`ac-4` / `dac4`）；槽索引未固定 | download |
-| 杜比 | DA1500 | 杜比 AJOC 1500 | Dolby AJOC 1500 | `size_new` 的一槽，`.mp4` AC-4 A-JOC 1500 kbps（`ac-4` / `dac4`）；槽索引未固定 | download |
+| 杜比 | DA448 | 杜比 AJOC 448 | Dolby AJOC 448 | `size_new` 的一槽，`.mp4` AC-4 A-JOC 448 kbps（`ac-4` / `dac4`）；槽索引未固定 | native / download（运行时） |
+| 杜比 | DA1500 | 杜比 AJOC 1500 | Dolby AJOC 1500 | `size_new` 的一槽，`.mp4` AC-4 A-JOC 1500 kbps（`ac-4` / `dac4`）；槽索引未固定 | native / download（运行时） |
 
 2026-10-31 分类修正依据：监工已逐一下载 J.Y. Park《WET》`001ATFiY3pb3y6` 的四档杜比文件，检查 MP4 样本描述盒 `stsd` 的 sample entry / 配置子盒标记。DA、DA448、DA1500 均为 `ac-4` / `dac4`（DA1500 在头部 2 MB 内确认）；DAEAC3 为 `ec-3` / `dec3`，才是真 E-AC-3。此前将四档一律记作 E-AC-3 JOC 的结论作废。A-JOC 属于 AC-4，448 / 1500 kbps 来自档位名义码率。QQ 编码管线固定，以上四档按档位确定性映射编码与分类，不凭 `.mp4`、相等大小或通用 codec 元数据把 DA 系改判为 E-AC-3；本轮不重复线上探测。
 
@@ -53,9 +53,9 @@
 
 ## 播放与详情页
 
-`native` 用于 MP3、AAC/M4A、Ogg、FLAC 等可由浏览器解码的载荷，前端再结合 `canPlayType` 检测实际能力。QAI、Q360V1/V2 的多声道 FLAC 交给浏览器解码下混；若实际载荷不同，则按探测编码分类。NAC、DTS、DTSX、RA360 与 AC-4 等无解码器载荷为 `download`，沿用 Apple 不可播变体的「仅下载」提示与禁用播放风格。
+`native` 用于有已知 MIME 的载荷，前端按当前浏览器能力动态决定。探测对每个 MIME 缓存结果，优先调用 `MediaSource.isTypeSupported(mime)`，不通过时再调用 `HTMLAudioElement.canPlayType(mime)`；两者都不可用或返回不支持时归类为 `download`。QAI、Q360V1/V2 的多声道 FLAC 交给浏览器解码下混；若实际载荷不同，则按探测编码分类。NAC、DTS、DTSX、RA360 仍固定为 `download`。
 
-按用户 2026-10-31「先实测、不行就放弃浏览器内解析」的定案，DA、DA448、DA1500 的 AC-4 载荷只提供下载，不做浏览器内解析播放。本应用没有 AC-4 解码器，既有 JOC 管线只解 E-AC-3 JOC；详情页的三档不显示播放按钮，队列选档也不进入 `qq-joc-input` / `JocLiveEngine`。JOC 入口只接受 `playback=joc`，四档杜比中仅 DAEAC3 符合。
+DA、DA448、DA1500 的 AC-4 载荷使用 `audio/mp4; codecs="ac-4"` 参与上述运行时探测：浏览器（例如具备授权解码能力的 Safari）通过探测时进入 `native`，否则保留下载入口。后端只报告固定的 `codec` / `contentType`，不以浏览器能力拒绝取链；`/qq/song/:mid/play` 对三档均正常返回 302。AC-4 不进入既有 E-AC-3 JOC 管线；JOC 入口只接受 `playback=joc`，四档杜比中仅 DAEAC3 符合。
 
 DAEAC3 通过同源 `/qq/song/:mid/download?quality=DAEAC3` 读取字节，`qq-joc-input.mjs` 的 `openQqJocTrack` 解出 MP4（或裸 E-AC-3）的音频样本，封装为既有 Worker 接受的分段，再由 `JocLiveEngine` → `joc-decode-worker.js` → 既有 EC-3 解码与 JOC 渲染器 → AudioWorklet/PCM 输出。QQ 字节不经过 Apple 解密或密钥接口。DAEAC3 继续使用已有 Speaker 2.0 / 双耳渲染和声场控制。
 
@@ -122,7 +122,7 @@ T7 离线验证：
 | 极高 / Very High | HQ | 高码率 AAC（通常 256 kbps；> 128 kbps） |
 | 标准 / Standard | WEB | AAC ≤ 128 kbps / HE-AAC |
 
-从所选档开始逐级向下找候选：`Hi-Res → 无损 → 杜比 → 极高 → 标准`。QQ 对应严格的 `RS → SQ → DAEAC3 → HQ → WEB`，Hi-Res 缺失先退 SQ；只选 `available === true` 且 `playback ∈ {native, joc}` 的行，若归一化行标记 `playable === false`（浏览器能力不支持）也跳过。AC-4 的 DA / DA448 / DA1500、其他仅下载档及阶梯外档位不参加默认选择；所选档及以下均无候选时返回 null，由入口显示无可播音质，完整手动档表仍保留。
+从所选档开始逐级向下找候选：`Hi-Res → 无损 → 杜比 → 极高 → 标准`。QQ 对应严格的 `RS → SQ → DAEAC3 → HQ → WEB`，Hi-Res 缺失先退 SQ；只选 `available === true` 且 `playback ∈ {native, joc}` 的行，若归一化行标记 `playable === false`（浏览器能力不支持）也跳过。AC-4 的 DA / DA448 / DA1500 在浏览器探测通过时可按 `native` 参加可播筛选，否则保留下载；其他仅下载档及阶梯外档位不参加默认选择。
 
 QQ 队列采用侵入较小的「播放前懒取」方案：`resolveEntry` 对没有明确 `quality` 的条目先取 `/qq/song/:mid/qualities`，再按偏好选档并生成带 `?quality=` 的播放链接。请求失败时保留原 HQ 起播兼容行为；成功返回空表时不假定 HQ 可用。已有明确档位的队列条目直接使用该档位，不额外取 qualities。QQ 详情页的头部播放按钮使用已加载的候选和同一纯函数。
 
@@ -144,7 +144,7 @@ T3 离线验证：
 
 ## T2：播放器音质标与质量面板接入（2026-10-31）
 
-`src/ui/sources/qq.mjs` 的 `qualityVariant` / `qualityVariants` 将 `/qq/song/:mid/qualities` 返回的档位适配为播放器变体。只收 `available === true` 且 `playback` 为 `native` / `joc` 的行，保留 `quality`（同时作为 `group_id`）、`format`、`playback`、实际 `codec` / `codecs` 与 `contentType`。AC-4、NAC 等仅下载档与不可用档不进入播放器面板；浏览器能力不足的 native/JOC 档仍列出并置灰，能力检测使用 `detectQqModes`，不依赖 Apple 解密能力。
+`src/ui/sources/qq.mjs` 的 `qualityVariant` / `qualityVariants` 将 `/qq/song/:mid/qualities` 返回的档位适配为播放器变体。只收 `available === true` 且 `playback` 为 `native` / `joc` 的行，保留 `quality`（同时作为 `group_id`）、`format`、`playback`、实际 `codec` / `codecs` 与 `contentType`。AC-4 随浏览器 MIME 探测结果进入 `native` 或保留下载；NAC 等固定仅下载档与不可用档不进入播放器面板；浏览器能力不足的 native/JOC 档仍列出并置灰，能力检测使用 `detectQqModes`，不依赖 Apple 解密能力。
 
 队列解析和详情页的 `qualityItem` 不再写入占位的 `variants: []`。打开音质标时，`AmPlayer.variantsOf` 通过 `qq.qualities` 懒取真实档位，沿用 `variantCache` 的加载、错误、容量 20 与重新打开失败重试机制；缓存键为 `qq:<mid>`，与相同 ID 的 Apple 歌曲隔离。取回后把真实 variants 附到对应播放条目并重绘面板；空结果也缓存，延迟返回的 QQ 请求不会覆盖 Apple 面板。音质标显示当前 `QQ · <quality>` 并复用 Apple 面板的样式、当前档勾选与可访问性属性，原生播放说明使用独立的中英文文案。
 
@@ -164,7 +164,7 @@ T3 离线验证：
 ## 本轮 AC-4 分类修正的离线验证（2026-10-31）
 
 - `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**67 项通过，0 失败，仅过滤指定的 3 个 wrapper 测试**。
-- `node --test --test-isolation=none tests/qq_source.mjs tests/qq_joc_input.mjs tests/player_modes.cjs`：**35 项通过，0 失败**。四档期望值按 DA / DA448 / DA1500 / DAEAC3 顺序为 `download/download/download/joc`；验证固定编码与格式、旧队列的 `ec-3` 元数据、详情选档仅下载、AC-4 不取 JOC 输入也不创建渲染引擎，以及 DAEAC3 经实际 `AmPlayer.tryMode` / `JocLiveEngine` 入口的 E-AC-3 渲染衔接。
+- `node --test --test-isolation=none tests/qq_source.mjs tests/qq_joc_input.mjs tests/player_modes.cjs`：**35 项通过，0 失败**。四档编码与格式按 DA / DA448 / DA1500 / DAEAC3 顺序为 `ac-4/ac-4/ac-4/ec-3`，播放分类随浏览器 MIME 探测为 `native` 或 `download`，JOC 仍仅由 DAEAC3 使用；验证固定编码与格式、旧队列的 `ec-3` 元数据、AC-4 不取 JOC 输入，以及 DAEAC3 经实际 `AmPlayer.tryMode` / `JocLiveEngine` 入口的 E-AC-3 渲染衔接。
 - `cargo clippy --offline -p am-hook --all-targets -- -D warnings`：通过，无 warning。
 - 修改过的 JS/MJS 语法检查、`git diff --check` 及修改过的 Rust 文件格式检查通过。stable 未安装 rustfmt，使用已安装的 `nightly-2026-08-20` rustfmt 完成格式检查。
 

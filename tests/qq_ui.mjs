@@ -14,7 +14,7 @@ const defaultQualities = [
 ];
 
 function detailPage(t, { qualities = defaultQualities, failQualities = false, nativeModes = ['native'] } = {}) {
-  const saved = Object.fromEntries(['document', 'window', 'matchMedia', 'fetch', 'localStorage']
+  const saved = Object.fromEntries(['document', 'window', 'MediaSource', 'matchMedia', 'fetch', 'localStorage']
     .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const controller = new AbortController();
   t.after(() => {
@@ -35,6 +35,7 @@ function detailPage(t, { qualities = defaultQualities, failQualities = false, na
   globalThis.localStorage = local;
   globalThis.matchMedia = () => ({ matches: false, addEventListener() {} });
   globalThis.window = { AmI18n: { t: (key) => key }, AmHook: { formatTime: String, detectQqModes: () => nativeModes } };
+  globalThis.MediaSource = { isTypeSupported: () => true };
   globalThis.fetch = async (path) => ({ ok: !failQualities || !path.endsWith('/qualities'), status: 503,
     json: async () => path.endsWith('/qualities') ? { qualities }
       : path.endsWith('/lyrics') ? { candidates: [] } : { id: 'test', name: 'Test', cover } });
@@ -43,7 +44,7 @@ function detailPage(t, { qualities = defaultQualities, failQualities = false, na
   return { root, local, played, queued, rerender: () => rerender() };
 }
 
-test('QQ detail omits unavailable tiers while retaining available download-only rows after rerender', async (t) => {
+test('QQ detail omits unavailable tiers while retaining runtime-playable and download rows after rerender', async (t) => {
   const { root, rerender } = detailPage(t);
   assert.equal(root.querySelector('#variant-list').children.length, 0, 'loading has no placeholder tiers');
   assert.equal(root.querySelector('#quality-status').textContent, 'qq.qualitiesLoading');
@@ -53,7 +54,7 @@ test('QQ detail omits unavailable tiers while retaining available download-only 
     assert.deepEqual(rows.map((row) => row.dataset.quality), ['HQ', 'DA']);
     assert.ok(rows[0].querySelector('button'));
     assert.equal(rows[0].querySelector('a').href, '/qq/song/test/download?quality=HQ');
-    assert.equal(rows[1].querySelector('button'), null);
+    assert.ok(rows[1].querySelector('button'));
     assert.equal(rows[1].querySelector('a').href, '/qq/song/test/download?quality=DA');
     assert.equal(root.querySelector('#quality-status').textContent, '');
     rerender();

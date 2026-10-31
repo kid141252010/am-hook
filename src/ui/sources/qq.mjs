@@ -15,18 +15,59 @@ const DEFAULT_CODECS = {
 const CONTENT_TYPES = {
   mp3: 'audio/mpeg', aac: 'audio/mp4; codecs="mp4a.40.2"', flac: 'audio/flac', vorbis: 'audio/ogg; codecs="vorbis"',
   opus: 'audio/ogg; codecs="opus"', pcm: 'audio/wav', 'ec-3': 'audio/mp4; codecs="ec-3"',
+  'ac-4': 'audio/mp4; codecs="ac-4"',
 };
+
+// Cache by MIME and the runtime objects used for the probe. The object identity
+// check keeps test/SSR environments from retaining a result after a fake browser
+// is installed, while normal browser calls still use one result per MIME.
+const mimeSupport = new Map();
+function mimeEnvironment(environment) {
+  const win = environment?.window;
+  const mediaSource = environment?.MediaSource ?? win?.MediaSource;
+  const document = environment?.document ?? win?.document;
+  return { win, mediaSource, document };
+}
+
+/** Runtime browser capability probe shared by QQ playback classification/tests. */
+export function supportsMime(mime, environment = globalThis) {
+  const context = mimeEnvironment(environment);
+  const cached = mimeSupport.get(mime);
+  if (cached && cached.win === context.win && cached.mediaSource === context.mediaSource && cached.document === context.document) {
+    return cached.supported;
+  }
+  let supported = false;
+  if (context.win && context.document) {
+    try {
+      supported = typeof context.mediaSource?.isTypeSupported === 'function'
+        && context.mediaSource.isTypeSupported(mime) === true;
+      if (!supported) {
+        const audio = context.document.createElement?.('audio');
+        supported = typeof audio?.canPlayType === 'function' && audio.canPlayType(mime) !== '';
+      }
+    } catch { supported = false; }
+  }
+  mimeSupport.set(mime, { ...context, supported });
+  return supported;
+}
+
+export function clearMimeSupportCache() { mimeSupport.clear(); }
+
 /** WET stsd: DA/DA448/DA1500 = ac-4/dac4; DAEAC3 = ec-3/dec3 (2026-10-31).
  * QQ's fixed Dolby pipelines determine those codecs, including for saved queues.
- * Other tiers use codec metadata; tiers without decoders stay download-only. */
-export function playbackInfo(quality = 'HQ', row = {}) {
+ * EC-3 remains on the JOC pipeline; baseline codecs are native, while
+ * AC-4 (support varies with browser licensing) is probed at runtime. */
+export function playbackInfo(quality = 'HQ', row = {}, environment = globalThis) {
   qualityId(quality);
   const dolby = ['DA', 'DA448', 'DA1500', 'DAEAC3'].includes(quality);
   const codec = !dolby && typeof row.codec === 'string' ? row.codec : DEFAULT_CODECS[quality];
+  const contentType = !dolby && typeof row.contentType === 'string' ? row.contentType
+    : CONTENT_TYPES[codec] || 'application/octet-stream';
   const playback = ['NAC', 'DTS', 'DTSX', 'RA360'].includes(quality) ? 'download'
-    : codec === 'ec-3' ? 'joc' : Object.hasOwn(CONTENT_TYPES, codec) ? 'native' : 'download';
-  return { playback, codec, codecs: codec, contentType: !dolby && typeof row.contentType === 'string' ? row.contentType
-    : CONTENT_TYPES[codec] || (codec === 'ac-4' ? 'audio/mp4; codecs="ac-4"' : 'application/octet-stream') };
+    : codec === 'ec-3' ? 'joc'
+      : !Object.hasOwn(CONTENT_TYPES, codec) ? 'download'
+        : codec === 'ac-4' && !supportsMime(contentType, environment) ? 'download' : 'native';
+  return { playback, codec, codecs: codec, contentType };
 }
 export function qualityId(value = 'HQ') {
   if (!QUALITY_IDS.includes(value)) throw new Error('Invalid QQ quality');
@@ -97,13 +138,14 @@ export async function searchSongs(q, { limit = 30, offset = 0, signal } = {}) {
   return { songs: (data.songs || []).map(toTrack), total: data.total || 0 };
 }
 export async function song(id, signal) { return toTrack(await request(`/qq/song/${mid(id)}`, signal)); }
-export function qualityRows(data, id, detect = globalThis.window?.AmHook?.detectQqModes) {
+export function qualityRows(data, id, detect, environment = globalThis) {
   const rows = Array.isArray(data?.qualities) ? data.qualities : [];
+  detect ||= globalThis.window?.AmHook?.detectQqModes;
   return QUALITY_IDS.map((quality) => {
     const row = rows.find((item) => item?.quality === quality);
     const sizeBytes = Number.isSafeInteger(row?.sizeBytes) && row.sizeBytes >= 0 ? row.sizeBytes : null;
     const available = row?.available === true && sizeBytes > 0;
-    const info = playbackInfo(quality, row);
+    const info = playbackInfo(quality, row, environment);
     const playable = available && info.playback !== 'download' && (!detect || detect(info).length > 0);
     return { quality, available, playable, sizeBytes, ...info, format: typeof row?.format === 'string' ? row.format : '',
       ...(available ? { downloadUrl: downloadUrl(id, quality) } : {}),

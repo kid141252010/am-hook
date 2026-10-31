@@ -1395,21 +1395,21 @@ fn dolby_tiers_follow_verified_wet_sample_entries() {
             Quality::Da,
             5112212,
             Codec::Ac4,
-            Playback::Download,
+            Playback::Native,
             "AC-4 Dolby Atmos",
         ),
         (
             Quality::Da448,
             8936764,
             Codec::Ac4,
-            Playback::Download,
+            Playback::Native,
             "AC-4 A-JOC 448 kbps",
         ),
         (
             Quality::Da1500,
             29870162,
             Codec::Ac4,
-            Playback::Download,
+            Playback::Native,
             "AC-4 A-JOC 1500 kbps",
         ),
         (
@@ -1445,7 +1445,7 @@ fn spatial_flac_is_native_and_undecodable_tiers_remain_download_only() {
     for quality in [Quality::Qai, Quality::Q360v1, Quality::Q360v2] {
         for (extension, expected) in [
             ("flac", Playback::Native),
-            ("ac4", Playback::Download),
+            ("ac4", Playback::Native),
             ("dts", Playback::Download),
             ("mp4", Playback::Download),
         ] {
@@ -1531,8 +1531,8 @@ fn audio_response_requires_a_public_qq_url_and_treats_missing_sizes_as_unavailab
 fn explicit_codec_metadata_precedes_container_and_size_and_stays_allowlisted() {
     for key in ["codec", "codecs", "audio_codec"] {
         for (name, codec, playback) in [
-            ("ac4", "ac-4", Playback::Download),
-            ("ac-4", "ac-4", Playback::Download),
+            ("ac4", "ac-4", Playback::Native),
+            ("ac-4", "ac-4", Playback::Native),
             ("eac3", "ec-3", Playback::Joc),
             ("flac", "flac", Playback::Native),
         ] {
@@ -1724,7 +1724,7 @@ async fn qualities_endpoint_returns_all_tiers_and_uses_shared_cached_probes() {
             true,
             Some(5112212),
             "AC-4 Dolby Atmos",
-            "download",
+            "native",
             "ac-4",
         ),
         ("DAEAC3", true, Some(5112212), "E-AC-3 JOC", "joc", "ec-3"),
@@ -1733,7 +1733,7 @@ async fn qualities_endpoint_returns_all_tiers_and_uses_shared_cached_probes() {
             true,
             Some(8936764),
             "AC-4 A-JOC 448 kbps",
-            "download",
+            "native",
             "ac-4",
         ),
         (
@@ -1741,7 +1741,7 @@ async fn qualities_endpoint_returns_all_tiers_and_uses_shared_cached_probes() {
             true,
             Some(29870162),
             "AC-4 A-JOC 1500 kbps",
-            "download",
+            "native",
             "ac-4",
         ),
     ] {
@@ -1810,7 +1810,7 @@ async fn cached_payload_overrides_verified_default_without_cross_tier_leakage() 
     let row = |quality: &str| rows.iter().find(|row| row["quality"] == quality).unwrap();
     assert_eq!(row("WEB")["sizeBytes"], 1280);
     assert_eq!(row("WEB")["codec"], "mp3");
-    assert_eq!(row("DA")["playback"], "download");
+    assert_eq!(row("DA")["playback"], "native");
     assert_eq!(row("DA")["format"], "AC-4 Dolby Atmos");
     assert_eq!(row("DAEAC3")["playback"], "joc");
     assert_eq!(row("DAEAC3")["sizeBytes"], 5112212);

@@ -103,8 +103,11 @@
       if (!global.Worker || !global.WebAssembly || !(global.AudioContext || global.webkitAudioContext)) return [];
       return jocSettings().mode === 'binaural' ? ['jocbin', 'joc2'] : ['joc2'];
     }
+    const mime = item.contentType || 'audio/mpeg';
+    const MS = global.ManagedMediaSource || global.MediaSource;
+    if (MS && typeof MS.isTypeSupported === 'function' && MS.isTypeSupported(mime)) return ['native'];
     audio ||= global.document?.createElement('audio');
-    return !audio?.canPlayType || audio.canPlayType(item.contentType || 'audio/mpeg') ? ['native'] : [];
+    return typeof audio?.canPlayType === 'function' && audio.canPlayType(mime) !== '' ? ['native'] : [];
   }
 
   const loadQq = () => typeof module !== 'undefined' && module.exports
@@ -220,7 +223,7 @@
    */
   function qualityBadge(v) {
     if (v?.source === 'qq') {
-      if (v.playback === 'joc') return 'atmos';
+      if (v.playback === 'joc' || v.codec === 'ac-4') return 'atmos';
       if (v.codec === 'flac') return v.quality === 'RS' ? 'hires' : 'lossless';
       return v.codec === 'aac' ? 'lossy' : '';
     }

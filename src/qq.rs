@@ -502,7 +502,8 @@ impl Quality {
             // WET (001ATFiY3pb3y6) stsd verification, 2026-10-31:
             // DA/DA448/DA1500 = ac-4/dac4; DAEAC3 = ec-3/dec3.
             // QQ's fixed Dolby pipelines determine the codec by tier.
-            // AC-4 has no decoder here; only DAEAC3 uses the E-AC-3 JOC path.
+            // AC-4 is reported as a native MIME candidate; only DAEAC3 uses
+            // the E-AC-3 JOC path in the frontend.
             Self::Da | Self::Da448 | Self::Da1500 => Codec::Ac4,
             Self::Daeac3 => Codec::Ec3,
             Self::Ra360 => Codec::Unknown,
@@ -637,7 +638,7 @@ impl Codec {
     }
     fn playback(self) -> Playback {
         match self {
-            Self::Mp3 | Self::Aac | Self::Flac | Self::Ogg | Self::Opus | Self::Wav => {
+            Self::Mp3 | Self::Aac | Self::Flac | Self::Ogg | Self::Opus | Self::Wav | Self::Ac4 => {
                 Playback::Native
             }
             Self::Ec3 => Playback::Joc,
