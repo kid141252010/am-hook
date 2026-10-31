@@ -399,6 +399,68 @@ fn qrc_word_timing_and_optional_fields_fall_through_safely() {
     );
     assert_eq!(field_text(&json!({"lrc":"[00:01]text"}), "qrc"), None);
 }
+
+#[test]
+fn qrc_parser_matches_amll_word_and_background_semantics() {
+    let source = concat!(
+        "[94530,1440]I’ve (94530,30)been (94560,180)thinking (94740,570)of (95310,180)you((95490,30)滋(95520,60)生(95580,60)着(95640,60)那(95700,60)些(95760,60)疯(95820,60)狂(95880,60))(95940,30)\n",
+        "[41310,1740]You’re (41310,60)the (41370,120)masterpiece((41490,30)你(41520,210)会(41730,90)是(41820,120)落(41940,60)笔(42030,330)的(42360,60)杰(42420,60)作(42480,60))(42540,510)\n",
+        "[27270,1500]Like (27270,330)that (27600,390)I’m (27990,60)back (28050,390)again (28440,300)(again)(28740,30)\n",
+        "[2385,2385](你(2385,216)我(2601,216), (2817,216)却(3033,216)不(3249,216)止(3465,216)你(3681,216)我(3897,216))(4113,216)"
+    );
+    let lines = qrc_lines(source);
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[0].words[4].text, "you(");
+    assert_eq!(lines[0].words[4].start, 95490);
+    assert_eq!(lines[1].words[2].text, "masterpiece(");
+    assert_eq!(lines[1].words[2].start, 41490);
+    assert_eq!(lines[2].words[5].text, "(again)");
+    assert_eq!(lines[2].words[5].start, 28740);
+
+    let background = &lines[3];
+    assert!(background.is_bg);
+    assert_eq!(background.words.first().unwrap().text, "你");
+    assert_eq!(background.words.last().unwrap().text, "");
+    assert_eq!(background.text, "你我, 却不止你我");
+}
+
+#[test]
+fn qrc_parser_drops_invalid_rows_and_keeps_parenthesized_fragments() {
+    let lines = qrc_lines(
+        "no timestamp\r\n[invalid,100]Bad(0,100)\r\n[-1,100]Bad(0,100)\n[0,20]   \n[0,20]\n[0,20]A(x)B(0,10) C(10,10)",
+    );
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        lines[0]
+            .words
+            .iter()
+            .map(|word| word.text.as_str())
+            .collect::<Vec<_>>(),
+        ["A(x)B", " C"]
+    );
+    assert_eq!(lines[0].words[0].start, 0);
+    assert_eq!(lines[0].words[1].end, 20);
+}
+
+#[test]
+fn qrc_background_rows_attach_with_nested_roles_or_stand_alone() {
+    let rendered = qrc_ttml(
+        "[0,100]main(0,100)\n[1000,1000](bg(1000,500))(1500,500)",
+        Some("[00:01.000]bg translation"),
+        Some("[1000,100]roman(1000,100)"),
+    )
+    .unwrap();
+    assert_eq!(rendered.matches("<p ").count(), 1);
+    assert!(rendered.contains(
+        "<span ttm:role=\"x-bg\" begin=\"1.000\" end=\"2.000\"><span begin=\"1.000\" end=\"1.500\">bg</span><span begin=\"1.500\" end=\"2.000\"></span><span ttm:role=\"x-translation\">bg translation</span><span ttm:role=\"x-roman\">roman</span></span>"
+    ));
+
+    let standalone = qrc_ttml("[1000,500](bg(1000,200))(1200,300)", None, None).unwrap();
+    assert_eq!(standalone.matches("<p ").count(), 1);
+    assert!(!standalone.contains("ttm:role=\"x-bg\""));
+    assert!(standalone.contains("<p begin=\"1.000\" end=\"1.500\">"));
+}
+
 #[test]
 fn qrc_content_preserves_unescaped_quotes_until_the_element_delimiter() {
     let content =
@@ -471,6 +533,7 @@ fn auxiliary_lines_prefers_word_text_and_filters_empty_or_placeholder_content() 
         start,
         end: start + 500,
         text: text.into(),
+        is_bg: false,
         words: words
             .into_iter()
             .map(|text| LyricWord {
@@ -774,6 +837,7 @@ fn test_line(start: u64, end: u64, text: &str) -> LyricLine {
         end,
         text: text.to_owned(),
         words: Vec::new(),
+        is_bg: false,
     }
 }
 
@@ -827,6 +891,7 @@ fn info_filter_applies_other_rules_and_pure_music_tracks() {
             end: 0,
             text: "占位".into(),
         }],
+        is_bg: false,
     };
     let kept = filter_info_lines(
         vec![

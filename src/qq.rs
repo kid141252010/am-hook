@@ -1198,6 +1198,7 @@ struct LyricLine {
     end: u64,
     text: String,
     words: Vec<LyricWord>,
+    is_bg: bool,
 }
 fn lrc_lines(text: &str) -> Vec<LyricLine> {
     let stamp = Regex::new(r"\[(\d+):(\d+(?:\.\d+)?)\]").unwrap();
@@ -1225,6 +1226,7 @@ fn lrc_lines(text: &str) -> Vec<LyricLine> {
                 end: start.saturating_add(8000),
                 text: content.clone(),
                 words: Vec::new(),
+                is_bg: false,
             });
         }
     }
@@ -1255,18 +1257,33 @@ fn qrc_content(text: &str) -> String {
         .replace("&amp;", "&")
 }
 fn qrc_lines(text: &str) -> Vec<LyricLine> {
-    // /lyric/new may omit QRC. Accept decrypted [start,duration]word(offset,duration)
-    // and QQ's XML LyricContent envelope; encrypted/compressed QRC falls through.
+    // This follows AMLL's parseQrc implementation. QRC word captures are lazy:
+    // each match consumes everything since the previous timing tuple, including
+    // parentheses, commas, and spaces. That is important for nested translations
+    // such as `you((123,4)字(127,4))`.
     let text = qrc_content(text);
-    let line = Regex::new(r"(?m)\[(\d+),(\d+)\]([^\r\n]*)").unwrap();
-    let word = Regex::new(r"([^()]+)\((\d+),(\d+)\)").unwrap();
+    let line = Regex::new(r"^\[(\d+),(\d+)\]").unwrap();
+    let word = Regex::new(r"(.*?)\((\d+),(\d+)\)").unwrap();
     let mut lines = Vec::new();
-    for c in line.captures_iter(&text) {
-        let (Ok(start), Ok(duration)) = (c[1].parse::<u64>(), c[2].parse::<u64>()) else {
+    for raw_line in text.split('\n') {
+        let line_text = raw_line.trim();
+        if line_text.is_empty() {
+            continue;
+        }
+        let Some(line_match) = line.captures(line_text) else {
             continue;
         };
+        let (Ok(start), Ok(duration)) =
+            (line_match[1].parse::<u64>(), line_match[2].parse::<u64>())
+        else {
+            continue;
+        };
+        let line_content = line_text[line_match[0].len()..].trim();
+        if line_content.is_empty() {
+            continue;
+        }
         let mut words = Vec::new();
-        for w in word.captures_iter(&c[3]) {
+        for w in word.captures_iter(line_content) {
             let (Ok(begin), Ok(duration)) = (w[2].parse::<u64>(), w[3].parse::<u64>()) else {
                 continue;
             };
@@ -1276,14 +1293,35 @@ fn qrc_lines(text: &str) -> Vec<LyricLine> {
                 text: clean_text(&w[1]),
             });
         }
-        if words.is_empty() {
-            continue;
+
+        let is_bg = !words.is_empty()
+            && (words[0].text.starts_with('(') || words[0].text.starts_with('（'))
+            && (words
+                .last()
+                .is_some_and(|word| word.text.ends_with(')') || word.text.ends_with('）')));
+        if is_bg {
+            if let Some(first) = words.first_mut() {
+                if let Some(text) = first.text.strip_prefix('(') {
+                    first.text = text.to_owned();
+                } else if let Some(text) = first.text.strip_prefix('（') {
+                    first.text = text.to_owned();
+                }
+            }
+            if let Some(last) = words.last_mut() {
+                if let Some(text) = last.text.strip_suffix(')') {
+                    last.text = text.to_owned();
+                } else if let Some(text) = last.text.strip_suffix('）') {
+                    last.text = text.to_owned();
+                }
+            }
         }
+
         lines.push(LyricLine {
             start,
             end: start.saturating_add(duration),
             text: words.iter().map(|word| word.text.as_str()).collect(),
             words,
+            is_bg,
         });
     }
     lines
@@ -1488,6 +1526,55 @@ fn all_pure_music(lines: &[LyricLine]) -> bool {
     !lines.is_empty() && lines.iter().all(|line| pure_music_line(&line.text))
 }
 
+fn render_words(line: &LyricLine, out: &mut String) {
+    if line.words.is_empty() {
+        out.push_str(&xml(&line.text));
+    } else {
+        for word in &line.words {
+            out.push_str(&format!(
+                "<span begin=\"{:.3}\" end=\"{:.3}\">{}</span>",
+                word.start as f64 / 1000.0,
+                word.end as f64 / 1000.0,
+                xml(&word.text)
+            ));
+        }
+    }
+}
+
+fn render_role(out: &mut String, role: &str, text: Option<&str>) {
+    if let Some(text) = text {
+        out.push_str(&format!("<span ttm:role=\"{role}\">{}</span>", xml(text)));
+    }
+}
+
+fn bg_parent(lines: &[LyricLine], bg_index: usize) -> Option<usize> {
+    let bg = &lines[bg_index];
+    let mut overlap: Option<usize> = None;
+    for (index, line) in lines.iter().enumerate() {
+        if line.is_bg || index == bg_index || line.start > bg.start || line.end <= bg.start {
+            continue;
+        }
+        // Main lyric intervals normally do not overlap. If they do, the one
+        // with the latest begin is the line whose active interval contains the
+        // background begin, matching the nearest temporal reading.
+        if overlap.is_none_or(|previous| line.start > lines[previous].start) {
+            overlap = Some(index);
+        }
+    }
+    if overlap.is_some() {
+        return overlap;
+    }
+    // A background row with no containing interval follows the most recent
+    // main row. Rows before the first main lyric stay standalone so content is
+    // never discarded.
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| !line.is_bg && *index != bg_index && line.start <= bg.start)
+        .max_by_key(|(_, line)| line.start)
+        .map(|(index, _)| index)
+}
+
 fn render_lyrics(
     lines: Vec<LyricLine>,
     word: bool,
@@ -1499,34 +1586,71 @@ fn render_lyrics(
     }
     let mut translations = auxiliary_lines(translations);
     let mut pronunciations = auxiliary_lines(pronunciations);
+    let mut attached_bg = vec![Vec::new(); lines.len()];
+    let mut standalone_bg = vec![false; lines.len()];
+    for (index, _line) in lines.iter().enumerate().filter(|(_, line)| line.is_bg) {
+        if let Some(parent) = bg_parent(&lines, index) {
+            attached_bg[parent].push(index);
+        } else {
+            standalone_bg[index] = true;
+        }
+    }
     let mut out = String::from("<body><div>");
-    for line in lines {
+    for (index, line) in lines.iter().enumerate() {
+        if line.is_bg {
+            if !standalone_bg[index] {
+                continue;
+            }
+            let translation = take_auxiliary(&mut translations, line.start);
+            let pronunciation = take_auxiliary(&mut pronunciations, line.start);
+            out.push_str(&format!(
+                "<p begin=\"{:.3}\" end=\"{:.3}\">",
+                line.start as f64 / 1000.0,
+                line.end as f64 / 1000.0
+            ));
+            render_words(line, &mut out);
+            render_role(&mut out, "x-translation", translation.as_deref());
+            render_role(&mut out, "x-roman", pronunciation.as_deref());
+            out.push_str("</p>");
+            continue;
+        }
+
+        // Reserve auxiliary rows for attached BG voices before matching the
+        // main row. This keeps an exact timestamp belonging to a BG row inside
+        // x-bg when both voices start together.
+        let bg_auxiliary: Vec<_> = attached_bg[index]
+            .iter()
+            .map(|&bg_index| {
+                let bg = &lines[bg_index];
+                (
+                    bg_index,
+                    take_auxiliary(&mut translations, bg.start),
+                    take_auxiliary(&mut pronunciations, bg.start),
+                )
+            })
+            .collect();
+        let translation = take_auxiliary(&mut translations, line.start);
+        let pronunciation = take_auxiliary(&mut pronunciations, line.start);
+
         out.push_str(&format!(
             "<p begin=\"{:.3}\" end=\"{:.3}\">",
             line.start as f64 / 1000.0,
             line.end as f64 / 1000.0
         ));
-        if line.words.is_empty() {
-            out.push_str(&xml(&line.text));
-        } else {
-            for word in line.words {
-                out.push_str(&format!(
-                    "<span begin=\"{:.3}\" end=\"{:.3}\">{}</span>",
-                    word.start as f64 / 1000.0,
-                    word.end as f64 / 1000.0,
-                    xml(&word.text)
-                ));
-            }
-        }
-        // Direct children of <p>, as parseTTML/readVoice and AMLL TTML expect.
-        // Allow LRC/QRC rounding differences, consuming each match once per role.
-        for (role, entries) in [
-            ("x-translation", &mut translations),
-            ("x-roman", &mut pronunciations),
-        ] {
-            if let Some(text) = take_auxiliary(entries, line.start) {
-                out.push_str(&format!("<span ttm:role=\"{role}\">{}</span>", xml(&text)));
-            }
+        render_words(line, &mut out);
+        render_role(&mut out, "x-translation", translation.as_deref());
+        render_role(&mut out, "x-roman", pronunciation.as_deref());
+        for (bg_index, translation, pronunciation) in bg_auxiliary {
+            let bg = &lines[bg_index];
+            out.push_str(&format!(
+                "<span ttm:role=\"x-bg\" begin=\"{:.3}\" end=\"{:.3}\">",
+                bg.start as f64 / 1000.0,
+                bg.end as f64 / 1000.0
+            ));
+            render_words(bg, &mut out);
+            render_role(&mut out, "x-translation", translation.as_deref());
+            render_role(&mut out, "x-roman", pronunciation.as_deref());
+            out.push_str("</span>");
         }
         out.push_str("</p>");
     }
