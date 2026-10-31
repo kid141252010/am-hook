@@ -13,7 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     num::NonZeroUsize,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
@@ -1581,7 +1581,14 @@ fn qrc_lines(text: &str) -> Vec<LyricLine> {
     }
     lines
 }
-fn auxiliary_lines(lines: Vec<LyricLine>) -> BTreeMap<u64, String> {
+const AUXILIARY_MAX_DISTANCE: u64 = 1000;
+
+struct AuxiliaryLine {
+    start: u64,
+    text: String,
+}
+
+fn auxiliary_lines(lines: Vec<LyricLine>) -> Vec<AuxiliaryLine> {
     lines
         .into_iter()
         .filter_map(|line| {
@@ -1590,22 +1597,49 @@ fn auxiliary_lines(lines: Vec<LyricLine>) -> BTreeMap<u64, String> {
             } else {
                 line.words.iter().map(|word| word.text.as_str()).collect()
             };
-            (!matches!(text.trim(), "" | "//")).then_some((line.start, text))
+            (!matches!(text.trim(), "" | "//")).then_some(AuxiliaryLine {
+                start: line.start,
+                text,
+            })
         })
         .collect()
 }
-fn take_auxiliary(entries: &mut BTreeMap<u64, String>, start: u64) -> Option<String> {
-    // Only the immediate predecessor/successor can be nearest. Prefer the earlier
-    // timestamp on ties; removing it gives the first main line exclusive use.
-    let before = entries.range(..=start).next_back();
-    let after = entries.range(start..).next();
-    let nearest = before
-        .into_iter()
-        .chain(after)
-        .map(|(&time, _)| time)
-        .min_by_key(|&time| time.abs_diff(start))
-        .filter(|&time| time.abs_diff(start) <= 120)?;
-    entries.remove(&nearest)
+
+fn align_auxiliary(lines: &[LyricLine], auxiliary: Vec<LyricLine>) -> Vec<Option<String>> {
+    let auxiliary = auxiliary_lines(auxiliary);
+    let mut candidates = Vec::new();
+    for (auxiliary_index, auxiliary_line) in auxiliary.iter().enumerate() {
+        for (line_index, line) in lines.iter().enumerate() {
+            let distance = auxiliary_line.start.abs_diff(line.start);
+            if distance <= AUXILIARY_MAX_DISTANCE {
+                // BG rows win equal-distance ties so a match remains nested in
+                // x-bg, as it was when attached BG rows were reserved first.
+                // Earlier target timestamps then provide deterministic ties.
+                candidates.push((
+                    distance,
+                    !line.is_bg,
+                    line.start,
+                    auxiliary_line.start,
+                    auxiliary_index,
+                    line_index,
+                ));
+            }
+        }
+    }
+    candidates.sort_unstable();
+
+    let mut used_auxiliary = vec![false; auxiliary.len()];
+    let mut used_lines = vec![false; lines.len()];
+    let mut aligned = vec![None; lines.len()];
+    for (_, _, _, _, auxiliary_index, line_index) in candidates {
+        if used_auxiliary[auxiliary_index] || used_lines[line_index] {
+            continue;
+        }
+        used_auxiliary[auxiliary_index] = true;
+        used_lines[line_index] = true;
+        aligned[line_index] = Some(auxiliary[auxiliary_index].text.clone());
+    }
+    aligned
 }
 
 // MeT-Music UI's role vocabulary, copied from met-info-filter-reference.md.
@@ -1839,8 +1873,6 @@ fn render_lyrics(
     if lines.is_empty() {
         return None;
     }
-    let mut translations = auxiliary_lines(translations);
-    let mut pronunciations = auxiliary_lines(pronunciations);
     let mut attached_bg = vec![Vec::new(); lines.len()];
     let mut standalone_bg = vec![false; lines.len()];
     for (index, _line) in lines.iter().enumerate().filter(|(_, line)| line.is_bg) {
@@ -1850,42 +1882,25 @@ fn render_lyrics(
             standalone_bg[index] = true;
         }
     }
+    let translations = align_auxiliary(&lines, translations);
+    let pronunciations = align_auxiliary(&lines, pronunciations);
     let mut out = String::from("<body><div>");
     for (index, line) in lines.iter().enumerate() {
         if line.is_bg {
             if !standalone_bg[index] {
                 continue;
             }
-            let translation = take_auxiliary(&mut translations, line.start);
-            let pronunciation = take_auxiliary(&mut pronunciations, line.start);
             out.push_str(&format!(
                 "<p begin=\"{:.3}\" end=\"{:.3}\">",
                 line.start as f64 / 1000.0,
                 line.end as f64 / 1000.0
             ));
             render_words(line, &mut out);
-            render_role(&mut out, "x-translation", translation.as_deref());
-            render_role(&mut out, "x-roman", pronunciation.as_deref());
+            render_role(&mut out, "x-translation", translations[index].as_deref());
+            render_role(&mut out, "x-roman", pronunciations[index].as_deref());
             out.push_str("</p>");
             continue;
         }
-
-        // Reserve auxiliary rows for attached BG voices before matching the
-        // main row. This keeps an exact timestamp belonging to a BG row inside
-        // x-bg when both voices start together.
-        let bg_auxiliary: Vec<_> = attached_bg[index]
-            .iter()
-            .map(|&bg_index| {
-                let bg = &lines[bg_index];
-                (
-                    bg_index,
-                    take_auxiliary(&mut translations, bg.start),
-                    take_auxiliary(&mut pronunciations, bg.start),
-                )
-            })
-            .collect();
-        let translation = take_auxiliary(&mut translations, line.start);
-        let pronunciation = take_auxiliary(&mut pronunciations, line.start);
 
         out.push_str(&format!(
             "<p begin=\"{:.3}\" end=\"{:.3}\">",
@@ -1893,9 +1908,9 @@ fn render_lyrics(
             line.end as f64 / 1000.0
         ));
         render_words(line, &mut out);
-        render_role(&mut out, "x-translation", translation.as_deref());
-        render_role(&mut out, "x-roman", pronunciation.as_deref());
-        for (bg_index, translation, pronunciation) in bg_auxiliary {
+        render_role(&mut out, "x-translation", translations[index].as_deref());
+        render_role(&mut out, "x-roman", pronunciations[index].as_deref());
+        for &bg_index in &attached_bg[index] {
             let bg = &lines[bg_index];
             out.push_str(&format!(
                 "<span ttm:role=\"x-bg\" begin=\"{:.3}\" end=\"{:.3}\">",
@@ -1903,8 +1918,8 @@ fn render_lyrics(
                 bg.end as f64 / 1000.0
             ));
             render_words(bg, &mut out);
-            render_role(&mut out, "x-translation", translation.as_deref());
-            render_role(&mut out, "x-roman", pronunciation.as_deref());
+            render_role(&mut out, "x-translation", translations[bg_index].as_deref());
+            render_role(&mut out, "x-roman", pronunciations[bg_index].as_deref());
             out.push_str("</span>");
         }
         out.push_str("</p>");

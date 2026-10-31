@@ -559,62 +559,47 @@ fn auxiliary_lines_prefers_word_text_and_filters_empty_or_placeholder_content() 
     })
     .collect();
     assert_eq!(
-        auxiliary_lines(lines),
-        BTreeMap::from([
-            (1000, "oneul bam & <neo>".into()),
-            (2000, "fallback & text".into()),
-            (7000, "actual words".into()),
-        ])
+        auxiliary_lines(lines)
+            .into_iter()
+            .map(|line| (line.start, line.text))
+            .collect::<Vec<_>>(),
+        vec![
+            (1000, "oneul bam & <neo>".to_owned()),
+            (2000, "fallback & text".to_owned()),
+            (7000, "actual words".to_owned()),
+        ]
     );
 }
 
 #[test]
-fn auxiliary_matching_takes_the_nearest_unused_start_within_120ms() {
-    let mut entries = BTreeMap::from([
-        (880, "earlier boundary".into()),
-        (1001, "nearest".into()),
-        (1120, "later boundary".into()),
-        (2000, "exact".into()),
-        (3000, "outside".into()),
-        (u64::MAX, "maximum".into()),
-    ]);
-    assert_eq!(
-        take_auxiliary(&mut entries, 1000).as_deref(),
-        Some("nearest")
-    );
-    // Equidistant rows choose the earlier timestamp, and matches cannot be reused.
-    assert_eq!(
-        take_auxiliary(&mut entries, 1000).as_deref(),
-        Some("earlier boundary")
-    );
-    assert_eq!(
-        take_auxiliary(&mut entries, 1000).as_deref(),
-        Some("later boundary")
-    );
-    assert_eq!(take_auxiliary(&mut entries, 1000), None);
-    assert_eq!(take_auxiliary(&mut entries, 2000).as_deref(), Some("exact"));
-    assert_eq!(take_auxiliary(&mut entries, 2879), None);
-    assert_eq!(take_auxiliary(&mut entries, 3121), None);
-    assert_eq!(
-        take_auxiliary(&mut entries, 2880).as_deref(),
-        Some("outside")
-    );
-    // Distances near the timestamp limits must not wrap or overflow.
-    assert_eq!(take_auxiliary(&mut entries, 0), None);
-    entries.insert(0, "zero".into());
-    assert_eq!(take_auxiliary(&mut entries, 120).as_deref(), Some("zero"));
-    entries.insert(121, "positive".into());
-    assert_eq!(take_auxiliary(&mut entries, 0), None);
-    assert_eq!(take_auxiliary(&mut entries, 1).as_deref(), Some("positive"));
-    assert_eq!(
-        take_auxiliary(&mut entries, u64::MAX - 120).as_deref(),
-        Some("maximum")
-    );
-    assert!(entries.is_empty());
+fn auxiliary_matching_uses_adaptive_nearest_neighbors() {
+    let main = vec![test_line(1000, 1200, "main")];
+    let translated = align_auxiliary(&main, vec![test_line(1400, 1500, "offset 400ms")]);
+    assert_eq!(translated[0].as_deref(), Some("offset 400ms"));
+
+    let too_far = align_auxiliary(&main, vec![test_line(2001, 2100, "offset 1001ms")]);
+    assert!(too_far[0].is_none());
 }
 
 #[test]
-fn auxiliary_roles_each_consume_matches_once_in_main_line_order() {
+fn auxiliary_matching_resolves_competing_rows_by_distance() {
+    let main = vec![
+        test_line(1000, 1200, "first"),
+        test_line(2000, 2200, "second"),
+    ];
+    let aligned = align_auxiliary(
+        &main,
+        vec![
+            test_line(1050, 1100, "near first"),
+            test_line(1100, 1150, "far first"),
+        ],
+    );
+    assert_eq!(aligned[0].as_deref(), Some("near first"));
+    assert_eq!(aligned[1].as_deref(), Some("far first"));
+}
+
+#[test]
+fn auxiliary_roles_each_attach_to_the_nearest_available_line() {
     let text = qrc_ttml_filtered(
         "[1090,100]first(1090,100)\n[1000,100]closer(1000,100)\n[1090,100]duplicate(1090,100)",
         Some("[00:01.001]translation & <text>"),
@@ -629,12 +614,12 @@ fn auxiliary_roles_each_consume_matches_once_in_main_line_order() {
         .collect();
     assert_eq!(rows.len(), 3);
     assert!(rows[0].starts_with("<p begin=\"1.090\""));
-    assert!(rows[0].ends_with(
+    assert!(!rows[0].contains("ttm:role="));
+    assert!(rows[1].starts_with("<p begin=\"1.000\""));
+    assert!(rows[1].ends_with(
         "</span><span ttm:role=\"x-translation\">translation &amp; &lt;text&gt;</span><span ttm:role=\"x-roman\">roman &amp; &lt;text&gt;</span></p>"
     ));
-    for row in &rows[1..] {
-        assert!(!row.contains("ttm:role="), "{row}");
-    }
+    assert!(!rows[2].contains("ttm:role="));
 }
 
 #[test]
