@@ -123,7 +123,7 @@ test('QQ badge opens the shared panel, fetches once and marks the current qualit
   assert.ok(options[0].check);
   assert.match(options[1].textContent, /QQ · SQFLAC 16-bit \/ 44.1 kHz/);
   assert.equal(options[0].disabled, false); // No AmDecrypt / MSE needed for native QQ.
-  assert.equal(options[4].disabled, true); // JOC requires Worker + Web Audio.
+  assert.equal(options[4].disabled, false); // Native EC-3 passthrough does not require the JOC renderer.
   assert.equal(player.current.variants, player.variantCache.get('qq:song').variants);
   player.closeQualityPanel();
   player.openQualityPanel();

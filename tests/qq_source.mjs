@@ -633,19 +633,29 @@ test('QQ rows keep downloads when codecs or browser capabilities prevent playbac
   }
 });
 
-test('QQ JOC capability detection is independent of Apple decryption and honors binaural settings', () => {
-  const saved = { Worker: globalThis.Worker, AudioContext: globalThis.AudioContext, AmDecrypt: globalThis.AmDecrypt };
+test('QQ JOC mode planning follows the JOC setting, then native passthrough, then PCM fallback', () => {
+  const saved = { Worker: globalThis.Worker, AudioContext: globalThis.AudioContext, AmDecrypt: globalThis.AmDecrypt,
+    MediaSource: globalThis.MediaSource };
   globalThis.Worker = function Worker() {};
   globalThis.AudioContext = function AudioContext() {};
   globalThis.AmDecrypt = undefined;
   try {
-    useJocSettings({ get: () => ({ mode: 'binaural' }) });
-    assert.deepEqual(detectQqModes(qq.playbackInfo('DAEAC3')), ['jocbin', 'joc2']);
+    for (const [supported, expected] of [[true, {
+      binaural: ['jocbin', 'joc2', 'native'], speaker: ['joc2', 'native'], off: ['native', 'joc2'],
+    }], [false, {
+      binaural: ['jocbin', 'joc2'], speaker: ['joc2'], off: ['joc2'],
+    }]]) {
+      globalThis.MediaSource = { isTypeSupported: () => supported };
+      for (const mode of ['binaural', 'speaker', 'off']) {
+        useJocSettings({ get: () => ({ mode }) });
+        assert.deepEqual(detectQqModes(qq.playbackInfo('DAEAC3')), expected[mode], `${supported ? 'native' : 'PCM'} ${mode}`);
+      }
+    }
     for (const quality of ['DA', 'DA448', 'DA1500']) assert.deepEqual(detectQqModes(qq.playbackInfo(quality)), ['native']);
-    useJocSettings({ get: () => ({ mode: 'off' }) });
-    assert.deepEqual(detectQqModes(qq.playbackInfo('DAEAC3')), ['joc2']);
+    globalThis.MediaSource = { isTypeSupported: () => true };
     globalThis.Worker = undefined;
-    assert.deepEqual(detectQqModes(qq.playbackInfo('DAEAC3')), []);
+    useJocSettings({ get: () => ({ mode: 'speaker' }) });
+    assert.deepEqual(detectQqModes(qq.playbackInfo('DAEAC3')), ['native']);
   } finally { Object.assign(globalThis, saved); useJocSettings(null); }
 });
 

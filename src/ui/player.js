@@ -99,16 +99,31 @@
   /** QQ files are unencrypted: JOC only needs the renderer, native files use HTMLAudio capabilities. */
   function detectQqModes(item, audio) {
     if (item.playback === 'download') return [];
-    if (item.playback === 'joc') {
-      if (!global.Worker || !global.WebAssembly || !(global.AudioContext || global.webkitAudioContext)) return [];
-      return jocSettings().mode === 'binaural' ? ['jocbin', 'joc2'] : ['joc2'];
-    }
     const mime = item.contentType || 'audio/mpeg';
-    const supportsMime = globalThis.AmHookQq?.supportsMime || globalThis.AmHook?.supportsMime;
-    if (typeof supportsMime !== 'function') return [];
-    const environment = audio ? { window: globalThis.window, ManagedMediaSource: globalThis.ManagedMediaSource,
-      MediaSource: globalThis.MediaSource, document: globalThis.document, audio } : globalThis;
-    return supportsMime(mime, environment) ? ['native'] : [];
+    // Uncached probe; qq.mjs's cached supportsMime must not be reused here because
+    // mode planning has to reflect the browser's current answer. The JOC branch
+    // counts only MediaSource support as native passthrough (an <audio> element
+    // accepting the MIME does not imply the system Atmos pipeline gets the stream).
+    const MS = global.ManagedMediaSource || global.MediaSource;
+    const msNative = !!(MS && typeof MS.isTypeSupported === 'function' && MS.isTypeSupported(mime));
+    if (item.playback === 'joc') {
+      const pcm = global.Worker && global.WebAssembly && (global.AudioContext || global.webkitAudioContext);
+      const mode = jocSettings().mode;
+      const modes = [];
+      if (pcm && mode === 'binaural') modes.push('jocbin');
+      if (pcm && mode !== 'off') modes.push('joc2');
+      if (msNative) modes.push('native');
+      // Keep the existing renderer as the last-resort path when native E-AC-3
+      // playback is rejected, including when JOC is set to Off.
+      if (pcm && !modes.includes('joc2')) modes.push('joc2');
+      return modes;
+    }
+    let native = msNative;
+    if (!native) {
+      audio ||= global.document?.createElement('audio');
+      native = typeof audio?.canPlayType === 'function' && audio.canPlayType(mime) !== '';
+    }
+    return native ? ['native'] : [];
   }
 
   const loadQq = () => typeof module !== 'undefined' && module.exports
@@ -2247,7 +2262,18 @@
       ['play', 'pause', 'playing', 'waiting', 'ended'].forEach((ev) => a.addEventListener(ev, () => { this.renderToggle(); this.emit(); }));
       a.addEventListener('ended', () => this.ended());
       a.addEventListener('error', () => {
-        // 尝试阶段的错误由 play() 统一处理（会自动换下一种播放方式）
+        const error = new Error(t('player.errorGeneric', { hint: fallbackHint() }));
+        // Some Safari versions report an unsupported EC-3 source through the
+        // media element error event even when play() did not reject. Feed that
+        // event into the same mode loop used by promise failures.
+        if (this.nativeAttempt && this.nativeAttempt.token === this.playToken && this.current?.mode === 'native') {
+          this.nativeAttempt.reject(error);
+          return;
+        }
+        if (this.nativeFallback && this.current?.source === 'qq' && this.current.mode === 'native') {
+          this.nativeFallback(error);
+          return;
+        }
         if (!this.attempting && this.current && this.current.mode !== 'mse' && this.audio.getAttribute('src')) {
           this.showError(() => t('player.errorGeneric', { hint: fallbackHint() }));
         }
@@ -2974,13 +3000,14 @@
     }
 
     /** options.force：同一首同一音质也重新开始（JOC 设置变化后换播放方式，见 replay） */
-    async start(item, { force = false, resumeAt: savedTime, paused = false } = {}) {
+    async start(item, { force = false, resumeAt: savedTime, paused = false, modes: requestedModes } = {}) {
       item = withIdentity(item);
       if (!force && this.current && trackKey(this.current) === trackKey(item) && this.current.id === item.id) { this.toggle(); return; }
+      this.nativeFallback = null;
       this.jocMode = jocSettings().mode;
       this.jocStale = false;
       this.jocFallback = false;
-      const modes = item.source === 'qq' ? detectQqModes(item, this.audio) : detectModes(item.codecs);
+      const modes = requestedModes || (item.source === 'qq' ? detectQqModes(item, this.audio) : detectModes(item.codecs));
       if (!modes.length) {
         this.showError(() => t('player.errorCodec', { codecs: item.codecs, hint: fallbackHint() }));
         return;
@@ -3019,8 +3046,30 @@
         this.current.duration = 0;
         this.renderMode();
         this.attempting = true;
+        const nativeAttempt = mode === 'native'
+          ? { token, reject: null }
+          : null;
+        const nativeFailure = nativeAttempt
+          ? new Promise((_, reject) => { nativeAttempt.reject = reject; })
+          : null;
         try {
-          await this.tryMode(mode, item, resumeAt, token, paused);
+          await (nativeFailure ? Promise.race([this.tryMode(mode, item, resumeAt, token, paused,
+            () => { this.nativeAttempt = nativeAttempt; }), nativeFailure])
+            : this.tryMode(mode, item, resumeAt, token, paused));
+          if (nativeAttempt && this.nativeAttempt === nativeAttempt) this.nativeAttempt = null;
+          if (mode === 'native' && item.source === 'qq') {
+            const nextMode = modes.indexOf(mode) + 1;
+            if (nextMode < modes.length) {
+              const fallback = () => {
+                if (this.nativeFallback !== fallback || token !== this.playToken || this.current?.mode !== 'native') return;
+                this.nativeFallback = null;
+                const transport = this.transport();
+                void this.start(item, { force: true, resumeAt: transport.currentTime,
+                  paused, modes: modes.slice(nextMode) });
+              };
+              this.nativeFallback = fallback;
+            }
+          }
           this.attempting = false;
           this.setLoading(false);
           this.showError('');
@@ -3032,6 +3081,7 @@
           }
           return;
         } catch (err) {
+          if (nativeAttempt && this.nativeAttempt === nativeAttempt) this.nativeAttempt = null;
           this.attempting = false;
           if (token !== this.playToken) return;
           if (err && err.name === 'NotAllowedError') {
@@ -3062,12 +3112,13 @@
       this.audio.load();
     }
 
-    async tryMode(mode, item, resumeAt, token, paused = false) {
+    async tryMode(mode, item, resumeAt, token, paused = false, onNativeReady) {
       if (item.source === 'qq' && isPcmMode(mode) && item.playback !== 'joc') {
         throw new Error('QQ JOC requires playback=joc');
       }
       this.teardown();
       if (mode === 'native') {
+        onNativeReady?.();
         this.audio.src = item.streamUrl;
         if (paused) {
           this.audio.addEventListener('loadedmetadata', () => {
