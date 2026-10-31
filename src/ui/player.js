@@ -374,11 +374,10 @@
       let row = entry;
       if (quality === undefined) {
         // No explicit tier: resolve the shared default-quality setting against
-        // this song's playable rows (lazily fetched). A failed lookup retains
-        // the shared current-quality startup behavior (HQ unless the settings
-        // layer initialized it), without caching it as a manual choice.
+        // the info-backed rows only. This keeps queue startup free of URL
+        // probes; the full qualities request remains for the detail panel.
         let rows;
-        try { rows = await qq.qualities(entry.track); } catch { /* use currentQuality on lookup failure */ }
+        try { rows = await qq.qualities(entry.track, undefined, { basic: true }); } catch { /* use currentQuality on lookup failure */ }
         if (rows) {
           row = qq.pickDefaultQuality(rows, preference);
           if (!row) throw Object.assign(new Error(t('album.noPlayable', { name: entry.name })), { noPlayable: true });
@@ -2982,7 +2981,9 @@
         if (token !== this.playToken) return;
         qq.setCurrentQuality(item.quality ?? qq.currentQuality);
         // Rebuild for older saved/source contexts too; <img> keeps item.artwork.
-        item.artworkFetchUrl = qq.coverUrl(item.qq?.albumMid ?? item.albumId ?? item.track);
+        // A song mid is never a substitute for a missing album mid.
+        const albumMid = item.qq?.albumMid || '';
+        item.artworkFetchUrl = albumMid ? qq.coverUrl(albumMid) : '';
       }
       // 同一首歌切换音质时从当前位置继续；专辑页换曲（track 不同）从头播放
       const resumeAt = savedTime ?? (this.current && trackKey(this.current) === trackKey(item) ? this.transport().currentTime : 0);

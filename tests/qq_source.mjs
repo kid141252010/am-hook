@@ -65,7 +65,7 @@ test('QQ optional fields default safely; invalid IDs cannot form adapter paths',
   assert.equal(track.qq.vip, false);
   assert.equal(track.qq.ttml, false);
   assert.deepEqual(track.artists, []);
-  for (const id of [undefined, null, '', '../secret', 'a?x=1', 'x'.repeat(33), '中']) {
+  for (const id of [undefined, null, '../secret', 'a?x=1', 'x'.repeat(33), '中']) {
     assert.throws(() => qq.toTrack({ id }));
     assert.throws(() => qq.playUrl(id));
     assert.throws(() => qq.downloadUrl(id));
@@ -75,6 +75,16 @@ test('QQ optional fields default safely; invalid IDs cannot form adapter paths',
   assert.equal(qq.playUrl('1'), '/qq/song/1/play');
   assert.equal(qq.downloadUrl('1'), '/qq/song/1/download');
   assert.equal(qq.coverUrl('1'), '/qq/cover/1');
+  assert.equal(qq.coverUrl(''), '');
+});
+
+test('QQ tracks without an album mid do not manufacture artwork URLs', () => {
+  const track = qq.toTrack({ id: 'songonly', name: 'Song', artists: ['Artist'], cover: dto.cover });
+  assert.equal(track.albumId, '');
+  assert.deepEqual(track.artwork, { url: '' });
+  const entry = qq.entryOf(track);
+  assert.equal(entry.artwork, '');
+  assert.equal(entry.artworkFetchUrl, '');
 });
 
 test('QQ quality rows list all tiers, retain formats and sizes, and omit unavailable actions', () => {
@@ -209,6 +219,8 @@ test('QQ clients only request local adapter paths and pass cancellation signals'
     assert.equal((await qq.song(dto.id)).key, `qq:${dto.id}`);
     assert.equal((await qq.lyrics(dto.id, parse)).source, 'lrc');
     assert.equal((await qq.qualities(dto.id, controller.signal)).find((row) => row.quality === 'HQ').available, true);
+    await qq.qualities(dto.id, controller.signal, { basic: true });
+    assert.equal(calls.at(-1).path, `/qq/song/${dto.id}/qualities?basic=1`);
     assert.equal(calls.at(-1).options.signal, controller.signal);
     assert.ok(calls.every(({ path }) => path.startsWith('/qq/')));
     globalThis.fetch = async () => ({ ok: false, status: 503, json() { throw new Error('must not read upstream body'); } });
@@ -468,7 +480,7 @@ test('starting old QQ entries rebuilds the blob artwork URL while retaining the 
     await player.start({ source: 'qq', track: dto.id, id: `qq:${dto.id}:HQ`, ...album,
       artwork, streamUrl: qq.playUrl(dto.id), quality: 'HQ', ...qq.playbackInfo('HQ') }, { paused: true });
     assert.equal(player.current.artwork, artwork);
-    assert.equal(player.current.artworkFetchUrl, `/qq/cover/${album.qq?.albumMid ?? album.albumId ?? dto.id}`);
+    assert.equal(player.current.artworkFetchUrl, album.qq?.albumMid ? `/qq/cover/${album.qq.albumMid}` : '');
   }
 });
 

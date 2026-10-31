@@ -1103,7 +1103,7 @@ async fn configured_routes_validate_mid_and_serve_only_cached_dtos() {
             }],
             raw_qrc: false,
             raw_trans: false,
-            raw_roma: false,
+            raw_roma: true,
             raw: RawLyrics::default(),
         },
     );
@@ -1140,31 +1140,64 @@ async fn raw_lyric_route_validates_kind_reports_missing_data_and_uses_utf8_filen
             raw: RawLyrics {
                 qrc: Some("<LyricContent>qrc raw</LyricContent>".into()),
                 trans: Some("[00:01.00]translation raw".into()),
-                roma: None,
+                roma: Some("[00:01.00]roman raw".into()),
             },
         },
     );
-    let response = get(state.clone(), &format!("/qq/song/{mid}/lyrics/raw?kind=qrc")).await;
+    let response = get(
+        state.clone(),
+        &format!("/qq/song/{mid}/lyrics/raw?kind=qrc"),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
     assert_eq!(
         response.headers()[header::CONTENT_DISPOSITION],
         "attachment; filename=\"download.qrc\"; filename*=UTF-8''%E5%91%A8%E6%9D%B0%E4%BC%A6%20%2D%20%E6%99%B4%E5%A4%A9%2E%71%72%63"
     );
     assert_eq!(
-        String::from_utf8(to_bytes(response.into_body(), 100_000).await.unwrap().to_vec()).unwrap(),
+        String::from_utf8(
+            to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap()
+                .to_vec()
+        )
+        .unwrap(),
         "<LyricContent>qrc raw</LyricContent>"
     );
-    let response = get(state.clone(), &format!("/qq/song/{mid}/lyrics/raw?kind=qrctrans")).await;
+    let response = get(
+        state.clone(),
+        &format!("/qq/song/{mid}/lyrics/raw?kind=qrctrans"),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers()[header::CONTENT_DISPOSITION]
         .to_str()
         .unwrap()
-        .contains("%28%E7%BF%BB%E8%AF%91%29%2E%6C%72%63"));
+        .contains("%2E%74%72%61%6E%73%2E%6C%72%63"));
     assert_eq!(
-        String::from_utf8(to_bytes(response.into_body(), 100_000).await.unwrap().to_vec()).unwrap(),
+        String::from_utf8(
+            to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap()
+                .to_vec()
+        )
+        .unwrap(),
         "[00:01.00]translation raw"
     );
+    let response = get(
+        state.clone(),
+        &format!("/qq/song/{mid}/lyrics/raw?kind=qrcroma"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .contains("%2E%72%6F%6D%61%2E%71%72%63"));
     for query in ["", "?kind=bad", "?kind=qrc%2F"] {
         assert_eq!(
             get(state.clone(), &format!("/qq/song/{mid}/lyrics/raw{query}"))
@@ -1174,12 +1207,6 @@ async fn raw_lyric_route_validates_kind_reports_missing_data_and_uses_utf8_filen
             "{query}"
         );
     }
-    assert_eq!(
-        get(state, &format!("/qq/song/{mid}/lyrics/raw?kind=qrcroma"))
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
 }
 
 #[tokio::test]
@@ -1210,6 +1237,20 @@ fn download_filename_uses_metadata_and_keeps_the_cdn_extension() {
     let no_extension = reqwest::Url::parse("https://y.qq.com/audio").unwrap();
     assert!(download_disposition(&song, &no_extension).contains("download.m4a"));
 }
+
+#[test]
+fn filename_sanitizing_handles_empty_and_windows_reserved_bases() {
+    let url = reqwest::Url::parse("https://y.qq.com/audio.flac").unwrap();
+    let mut song = qq().song_dto(&raw_song()).unwrap();
+    song.id = "mid123".into();
+    song.artists.clear();
+    song.name.clear();
+    let empty = download_disposition(&song, &url);
+    assert!(empty.contains("%6D%69%64%31%32%33%2E%66%6C%61%63"));
+    song.id = "CON".into();
+    let reserved = download_disposition(&song, &url);
+    assert!(reserved.contains("%43%4F%4E%5F%2E%66%6C%61%63"));
+}
 #[test]
 fn album_mid_is_recovered_from_public_cover_when_album_id_is_numeric() {
     let mut raw = raw_song();
@@ -1217,6 +1258,15 @@ fn album_mid_is_recovered_from_public_cover_when_album_id_is_numeric() {
     raw["al"]["picUrl"] =
         json!("https://y.qq.com/music/photo_new/T002R500x500M000003DFRzD192KKD_5.jpg");
     assert_eq!(qq().song_dto(&raw).unwrap().album_mid, "003DFRzD192KKD");
+}
+
+#[test]
+fn song_without_an_album_mid_keeps_album_and_cover_empty() {
+    let mut raw = raw_song();
+    raw["al"] = json!({"name": "叶惠美"});
+    let song = qq().song_dto(&raw).unwrap();
+    assert_eq!(song.album_mid, "");
+    assert_eq!(song.cover, "");
 }
 
 #[test]
@@ -1787,6 +1837,32 @@ async fn qualities_endpoint_returns_all_tiers_and_uses_shared_cached_probes() {
         assert_eq!(row["available"], false);
         assert_eq!(row["sizeBytes"], Value::Null);
     }
+}
+
+#[tokio::test]
+async fn basic_qualities_use_only_info_fields_and_negative_probe_cache() {
+    let state = state(true);
+    let qq = state.qq.as_ref().unwrap();
+    qq.infos.put(
+        "abc".into(),
+        json!({"mid":"abc","file":{"size_320mp3":123,"size_flac":456,"size_dolby":789}}),
+    );
+    qq.audio_failures.put(Quality::Nac.cache_key("abc"), ());
+    let response = get(state.clone(), "/qq/song/abc/qualities?basic=1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+    let rows = body["qualities"].as_array().unwrap();
+    assert_eq!(rows.len(), 13);
+    assert!(rows.iter().all(|row| {
+        [
+            "MP3128", "AAC48", "WEB", "AAC192", "OGG96", "OGG192", "HQ", "SQ", "RS", "RA360",
+            "DTS", "DA", "DAEAC3",
+        ]
+        .contains(&row["quality"].as_str().unwrap())
+    }));
+    assert!(!rows.iter().any(|row| row["quality"] == "NAC"));
+    assert!(qq.audio_url("abc", Quality::Nac).await.is_err());
 }
 
 #[tokio::test]

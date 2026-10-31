@@ -45,9 +45,9 @@
 
 ## 可用性、格式与缓存
 
-`GET /qq/song/:mid/qualities` 始终按上表顺序返回 20 行，字段为 `quality`、`available`、`sizeBytes`、`format`、`playback`、`codec`、`contentType`，不包含音频直链。一次 info 的 `track_info.file` 服务全部档位，并与歌曲详情共享缓存。已验证字段优先用于大小与可用性；未知槽位及未知字段的档位逐码探测 `/extra/music/url`。只接受正数大小，0 或缺失不生成可用操作。
+`GET /qq/song/:mid/qualities` 默认按上表顺序返回 20 行，字段为 `quality`、`available`、`sizeBytes`、`format`、`playback`、`codec`、`contentType`，不包含音频直链。`?basic=1`（也接受 `?probe=0`）只返回 `track_info.file` 有明确 `size_field` 映射的档位，不请求任何 `/extra/music/url`；队列起播使用此基础模式，详情页和音质面板使用默认的完整模式。一次 info 的 `track_info.file` 服务全部档位，并与歌曲详情共享缓存。info 缓存只保留解析所需的 `track_info` 对象及其 DTO 所需字段，不保留外层响应。已验证字段优先用于大小与可用性；未知槽位及未知字段的档位在完整模式逐码探测 `/extra/music/url`。只接受正数大小，0 或缺失不生成可用操作。
 
-链接和探测结果共用 `(mid, quality)` 缓存，TTL 300 秒；命中的正数探测结果用于核对实际大小、载荷和格式，不会让另一档复用链接。`size_new` 不写死槽索引。非杜比档的格式码率说明只有在探测大小与对应 info 字段唯一相等、且实际编码相容时采用；杜比档采用上述已实测的固定管线与名义码率。DA 与 DAEAC3 共用 `size_dolby` 大小，不能由该字段推断编码；大小相等也不能把 AC-4 改判为 FLAC 或 E-AC-3。
+链接和成功探测结果共用 `(mid, quality)` 缓存，TTL 300 秒；失败探测另以 `(mid, quality)` 负缓存 120 秒，完整模式的探测信号量为 3 个，避免占满搜索和歌词共用的 8 个许可。命中的正数探测结果用于核对实际大小、载荷和格式，不会让另一档复用链接。`size_new` 不写死槽索引。非杜比档的格式码率说明只有在探测大小与对应 info 字段唯一相等、且实际编码相容时采用；杜比档采用上述已实测的固定管线与名义码率。DA 与 DAEAC3 共用 `size_dolby` 大小，不能由该字段推断编码；大小相等也不能把 AC-4 改判为 FLAC 或 E-AC-3。
 
 播放与下载使用严格大写的 `?quality=` 白名单；省略时保持 HQ，无效代码在上游请求前返回 400。下载后缀及 MIME 按实际文件取值，未知载荷为 `application/octet-stream`。
 
@@ -126,7 +126,7 @@ T7 离线验证：
 
 从所选档开始逐级向下找候选：`Hi-Res → 无损 → 杜比 → 极高 → 标准`。QQ 对应严格的 `RS → SQ → DAEAC3 → HQ → WEB`，Hi-Res 缺失先退 SQ；只选 `available === true` 且 `playback ∈ {native, joc}` 的行，若归一化行标记 `playable === false`（浏览器能力不支持）也跳过。AC-4 的 DA / DA448 / DA1500 在浏览器探测通过时可按 `native` 参加可播筛选，否则保留下载；其他仅下载档及阶梯外档位不参加默认选择。
 
-QQ 队列采用侵入较小的「播放前懒取」方案：`resolveEntry` 对没有明确 `quality` 的条目先取 `/qq/song/:mid/qualities`，再按偏好选档并生成带 `?quality=` 的播放链接。请求失败时保留原 HQ 起播兼容行为；成功返回空表时不假定 HQ 可用。已有明确档位的队列条目直接使用该档位，不额外取 qualities。QQ 详情页的头部播放按钮使用已加载的候选和同一纯函数。
+QQ 队列采用侵入较小的「播放前懒取」方案：`resolveEntry` 对没有明确 `quality` 的条目先取 `/qq/song/:mid/qualities?basic=1`，只用 info 字段按偏好选档并生成带 `?quality=` 的播放链接，不在起播路径探测未知档位。请求失败时保留原 HQ 起播兼容行为；成功返回空表时不假定 HQ 可用。已有明确档位的队列条目直接使用该档位，不额外取 qualities。QQ 详情页的头部播放按钮和音质面板使用默认完整模式，显示并探测全部档位。
 
 Apple 在既有 `variants + detectMode` 可播过滤及 best 排序后选择，类别从 `codecs / badge / label` 和现有 `group_id / sample_rate / bandwidth` 元数据识别，同类取最高带宽。阶梯未选出时仍取传入 best 列表首项兜底，空列表返回 null。队列和歌曲详情页头部播放按钮共用该函数；JOC 开关继续控制渲染方式，初始档位遵循共享音质偏好。
 
@@ -220,7 +220,7 @@ T3 离线验证：
 
 后端新增 `GET /qq/cover/:albumMid`，沿用 `valid_mid` 的 1–32 位 ASCII 字母数字校验，只拼装 `https://y.qq.com/music/photo_new/T002R500x500M000{albumMid}_5.jpg`；没有接受任意 URL 的入口。封面客户端使用既有 QQ 出站代理配置，并禁用重定向，保证只访问该固定模板。成功响应按字节流返回 `image/jpeg`，带 `Cache-Control: public, max-age=86400`；上游 404 返回 404，其他非成功状态（包括重定向）返回 502，不转发上游私有头或错误正文。未配置 QQ 时仍返回 404。
 
-前端保留 `artwork` 作为显示直链，在 `qq.entryOf → qualityEntry / qualityItem` 的播放条目中增加 `artworkFetchUrl: /qq/cover/<albumMid>`。`AmPlayer.start` 同时为旧条目和恢复的来源上下文重建该字段，优先取 `qq.albumMid`，其次为 `albumId`，缺失时沿用条目 ID 兜底。`app.mjs` 的 `getMeta` 仅在当前曲为 QQ 时透传该字段，`panel.mjs::loadArtwork` 用它为 AMLL 或经典 backdrop 取 blob；`updateMediaSession` 也仅对 QQ 选用此地址。Apple 的封面取图地址及元数据路径保持原有行为。
+前端保留 `artwork` 作为显示直链，在有 `albumMid` 时由 `qq.entryOf → qualityEntry / qualityItem` 的播放条目增加 `artworkFetchUrl: /qq/cover/<albumMid>`；缺少专辑 mid 时封面和本地取图地址都为空，绝不以歌曲 mid 代替，也不拼接 `/qq/cover/`。`AmPlayer.start` 为旧条目和恢复的来源上下文重建该字段时同样只接受 `qq.albumMid`。`app.mjs` 的 `getMeta` 仅在当前曲为 QQ 时透传该字段，`panel.mjs::loadArtwork` 用它为 AMLL 或经典 backdrop 取 blob；`updateMediaSession` 也仅对 QQ 选用此地址。Apple 的封面取图地址及元数据路径保持原有行为。
 
 搜索行、详情（含光晕）、迷你播放条和队列继续使用 QQ 直链。面板横向封面、竖向小封面及竖向大封面共用 `app.html` 中的 `<img class="lyrics-art">`，由 `renderHeader` 设置原 `artwork`；竖向大封面不是 blob/canvas 消费方，保持直链。
 
@@ -243,7 +243,7 @@ QQ `/lyric/new` 的 QRC 与 LRC 候选在 `render_lyrics` 前过滤主行，移�
 
 详情页 `/qq-song/:mid` 的歌词区默认折叠，只渲染预览/收起、QRC、QRC 翻译和 QRC 注音这一组可换行按钮；歌词行在点击预览后显示，再次点击收起。Apple 歌曲页的歌词和 TTML 下载逻辑没有改动。中英文文案位于 `src/ui/i18n.js`。
 
-`GET /qq/song/:mid/lyrics` 的 DTO 增加 `rawQrc`、`rawTrans`、`rawRoma` 三个布尔值。三个原文字段和转换候选保存在同一歌词缓存条目中，前端仅为对应字段为真时渲染下载链接。`GET /qq/song/:mid/lyrics/raw?kind=qrc|qrctrans|qrcroma` 从同一缓存取 `/lyric/new` 原文，分别以 `{歌手} - {歌名}.qrc`、`{歌手} - {歌名} (翻译).lrc`、`{歌手} - {歌名} (注音).qrc` 附件返回；非法 `kind` 返回 400，缺少该原文字段返回 404，文件名同时提供 RFC 5987 的 UTF-8 `filename*`。
+`GET /qq/song/:mid/lyrics` 的 DTO 增加 `rawQrc`、`rawTrans`、`rawRoma` 三个布尔值。三个原文字段和转换候选保存在同一歌词缓存条目中，前端仅为对应字段为真时渲染下载链接。`GET /qq/song/:mid/lyrics/raw?kind=qrc|qrctrans|qrcroma` 从同一缓存取 `/lyric/new` 原文，分别以 `{安全基名}.qrc`、`{安全基名}.trans.lrc`、`{安全基名}.roma.qrc` 附件返回；翻译和注音后缀使用 ASCII，QRC 本体不变。安全基名过滤 `/\\:*?"<>|`、控制字符，截断并去除首尾空格/点，空值回退歌曲 mid，Windows 保留名追加后缀。非法 `kind` 返回 400，缺少该原文字段返回 404，文件名同时提供 RFC 5987 的 UTF-8 `filename*`。
 
 ## T12：AMLL QRC 解析与背景声部（2026-10-31）
 

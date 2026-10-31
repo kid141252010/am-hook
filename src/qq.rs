@@ -135,10 +135,12 @@ pub struct Qq {
     media: reqwest::Client,
     cover: reqwest::Client,
     permits: tokio::sync::Semaphore,
+    probe_permits: tokio::sync::Semaphore,
     searches: Cache<SearchResult>,
     songs: Cache<Song>,
     infos: Cache<Value>,
     audio: Cache<Audio>,
+    audio_failures: Cache<()>,
     lyrics: Cache<Lyrics>,
 }
 impl Qq {
@@ -186,10 +188,12 @@ impl Qq {
                 .build()
                 .map_err(|e| format!("QQ cover client: {}", e.without_url()))?,
             permits: tokio::sync::Semaphore::new(8),
+            probe_permits: tokio::sync::Semaphore::new(3),
             searches: Cache::new(128, 600),
             songs: Cache::new(4096, 86400),
             infos: Cache::new(4096, 86400),
             audio: Cache::new(4096, 300),
+            audio_failures: Cache::new(4096, 120),
             lyrics: Cache::new(1024, 604800),
         })
     }
@@ -238,20 +242,26 @@ impl Qq {
                 .map(|c| c[1].to_owned())
             })
             .or_else(|| album.get("id").map(string).filter(|s| valid_mid(s)))
-            .unwrap_or_else(|| id.clone());
-        let cover = album
-            .get("picUrl")
-            .and_then(Value::as_str)
-            .filter(|url| cdn_url(url).is_some())
-            .map(|url| {
-                static RE: OnceLock<Regex> = OnceLock::new();
-                RE.get_or_init(|| Regex::new(r"T002(?:R\d+x\d+)?M000").unwrap())
-                    .replace(url, "T002R{w}x{h}M000")
-                    .into_owned()
-            })
-            .unwrap_or_else(|| {
-                format!("https://y.gtimg.cn/music/photo_new/T002R{{w}}x{{h}}M000{album_mid}.jpg")
-            });
+            .unwrap_or_default();
+        let cover = if album_mid.is_empty() {
+            String::new()
+        } else {
+            album
+                .get("picUrl")
+                .and_then(Value::as_str)
+                .filter(|url| cdn_url(url).is_some())
+                .map(|url| {
+                    static RE: OnceLock<Regex> = OnceLock::new();
+                    RE.get_or_init(|| Regex::new(r"T002(?:R\d+x\d+)?M000").unwrap())
+                        .replace(url, "T002R{w}x{h}M000")
+                        .into_owned()
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "https://y.gtimg.cn/music/photo_new/T002R{{w}}x{{h}}M000{album_mid}.jpg"
+                    )
+                })
+        };
         let artists = raw
             .get("ar")
             .or_else(|| raw.get("singer"))
@@ -312,9 +322,13 @@ impl Qq {
                 &[("platform", "qq".into()), ("mids", mid.into())],
             )
             .await?;
-        self.song_from_info(mid, &data)?;
-        self.infos.put(mid.into(), data.clone());
-        Ok(data)
+        // Keep only the normalized track_info object. The outer response may
+        // contain account, server and other upstream fields that no parser
+        // needs after the DTO has been built.
+        let track = track_info(mid, &data).clone();
+        self.song_from_info(mid, &track)?;
+        self.infos.put(mid.into(), track.clone());
+        Ok(track)
     }
     fn song_from_info(&self, mid: &str, data: &Value) -> ApiResult<Song> {
         let song = self.song_dto(track_info(mid, data)).ok_or_else(missing)?;
@@ -328,7 +342,10 @@ impl Qq {
         if let Some(audio) = self.audio.get(&key) {
             return Ok(audio);
         }
-        let data = self
+        if self.audio_failures.get(&key).is_some() {
+            return Err(unavailable());
+        }
+        let data = match self
             .request(
                 "/extra/music/url",
                 &[
@@ -338,38 +355,70 @@ impl Qq {
                     ("audio_api", "2".into()),
                 ],
             )
-            .await?;
-        let audio = Audio::from_response(&data)?;
+            .await
+        {
+            Ok(data) => data,
+            Err(error) => {
+                self.audio_failures.put(key, ());
+                return Err(error);
+            }
+        };
+        let audio = match Audio::from_response(&data) {
+            Ok(audio) => audio,
+            Err(error) => {
+                self.audio_failures.put(key, ());
+                return Err(error);
+            }
+        };
         self.audio.put(key, audio.clone());
         Ok(audio)
     }
-    async fn qualities(&self, mid: &str) -> ApiResult<Qualities> {
+    async fn probe_audio_url(&self, mid: &str, quality: Quality) -> ApiResult<Audio> {
+        let _permit = self
+            .probe_permits
+            .acquire()
+            .await
+            .map_err(|_| unavailable())?;
+        self.audio_url(mid, quality).await
+    }
+    async fn qualities(&self, mid: &str, basic: bool) -> ApiResult<Qualities> {
         // One info request supplies all size fields, shared with the song route.
         let data = self.info_data(mid).await?;
         let file = &track_info(mid, &data)["file"];
-        let qualities =
-            futures::future::join_all(QUALITY_LIST.into_iter().map(|quality| async move {
-                if !quality.needs_probe(file) {
-                    // Verified info mappings avoid unnecessary URL requests. Cached
-                    // probes still describe the actual payload when it differs.
-                    match self.audio.get(&quality.cache_key(mid)) {
-                        Some(audio) if audio.size_bytes.is_some() => {
-                            QualityRow::from_audio(quality, file, Some(&audio))
-                        }
-                        _ => QualityRow::from_size(
+        let qualities = futures::future::join_all(
+            QUALITY_LIST
+                .into_iter()
+                .filter(|quality| !basic || quality.size_field().is_some())
+                .map(|quality| async move {
+                    if basic {
+                        return QualityRow::from_size(
                             quality,
                             quality.info_size(file),
                             quality.format(),
-                        ),
+                        );
                     }
-                } else {
-                    // Unmapped tiers are probed separately, through the same short-lived
-                    // (mid, quality) cache used by playback and download.
-                    let audio = self.audio_url(mid, quality).await.ok();
-                    QualityRow::from_audio(quality, file, audio.as_ref())
-                }
-            }))
-            .await;
+                    if !quality.needs_probe(file) {
+                        // Verified info mappings avoid unnecessary URL requests. Cached
+                        // probes still describe the actual payload when it differs.
+                        match self.audio.get(&quality.cache_key(mid)) {
+                            Some(audio) if audio.size_bytes.is_some() => {
+                                QualityRow::from_audio(quality, file, Some(&audio))
+                            }
+                            _ => QualityRow::from_size(
+                                quality,
+                                quality.info_size(file),
+                                quality.format(),
+                            ),
+                        }
+                    } else {
+                        // Unmapped tiers are probed separately, through the same short-lived
+                        // (mid, quality) cache used by playback and download.
+                        let audio = self.probe_audio_url(mid, quality).await.ok();
+                        QualityRow::from_audio(quality, file, audio.as_ref())
+                    }
+                }),
+        )
+        .await;
         Ok(Qualities { qualities })
     }
 }
@@ -528,15 +577,12 @@ impl Quality {
         }
     }
     fn format(self) -> &'static str {
+        if let Some(field) = self.size_field() {
+            if let Some((_, format)) = FILE_FORMATS.iter().find(|(name, _)| *name == field) {
+                return format;
+            }
+        }
         match self {
-            Self::Mp3128 => "MP3 128 kbps",
-            Self::Aac48 => "AAC 48 kbps",
-            Self::Web => "AAC 96 kbps",
-            Self::Aac192 => "AAC 192 kbps",
-            Self::Ogg96 => "Ogg 96 kbps",
-            Self::Ogg192 => "Ogg 192 kbps",
-            Self::Hq => "MP3 320 kbps",
-            Self::Rs => "FLAC Hi-Res",
             Self::Ra360 => "360 Reality Audio",
             Self::Da => "AC-4 Dolby Atmos",
             Self::Da448 => "AC-4 A-JOC 448 kbps",
@@ -654,23 +700,140 @@ impl Codec {
         }
     }
     fn content_type(self) -> &'static str {
-        match self {
-            Self::Mp3 => "audio/mpeg",
-            Self::Aac => "audio/mp4; codecs=\"mp4a.40.2\"",
-            Self::Flac => "audio/flac",
-            Self::Ogg => "audio/ogg; codecs=\"vorbis\"",
-            Self::Opus => "audio/ogg; codecs=\"opus\"",
-            Self::Wav => "audio/wav",
-            Self::Ape => "audio/x-ape",
-            Self::Ec3 => "audio/mp4; codecs=\"ec-3\"",
-            Self::Ac3 => "audio/mp4; codecs=\"ac-3\"",
-            Self::Ac4 => "audio/mp4; codecs=\"ac-4\"",
-            Self::Dts => "audio/vnd.dts",
-            Self::Dtsx => "audio/vnd.dts.hd; codecs=\"dtsx\"",
-            Self::Nac => "audio/x-nac",
-            Self::Unknown => "application/octet-stream",
-        }
+        extension_info_for_codec(self)
+            .map(|info| info.content_type)
+            .unwrap_or("application/octet-stream")
     }
+}
+
+#[derive(Clone, Copy)]
+struct ExtensionInfo {
+    extension: &'static str,
+    codec: Codec,
+    content_type: &'static str,
+    download_content_type: &'static str,
+}
+
+// The playback MIME and the attachment MIME intentionally remain separate:
+// browsers need codec parameters while downloaded files should retain their
+// conventional raw-media type (for example .aac and .ac4).
+const EXTENSION_INFO: &[ExtensionInfo] = &[
+    ExtensionInfo {
+        extension: "mp3",
+        codec: Codec::Mp3,
+        content_type: "audio/mpeg",
+        download_content_type: "audio/mpeg",
+    },
+    ExtensionInfo {
+        extension: "flac",
+        codec: Codec::Flac,
+        content_type: "audio/flac",
+        download_content_type: "audio/flac",
+    },
+    ExtensionInfo {
+        extension: "m4a",
+        codec: Codec::Aac,
+        content_type: "audio/mp4; codecs=\"mp4a.40.2\"",
+        download_content_type: "audio/mp4",
+    },
+    ExtensionInfo {
+        extension: "mp4",
+        codec: Codec::Unknown,
+        content_type: "application/octet-stream",
+        download_content_type: "audio/mp4",
+    },
+    ExtensionInfo {
+        extension: "aac",
+        codec: Codec::Aac,
+        content_type: "audio/aac",
+        download_content_type: "audio/aac",
+    },
+    ExtensionInfo {
+        extension: "ogg",
+        codec: Codec::Ogg,
+        content_type: "audio/ogg; codecs=\"vorbis\"",
+        download_content_type: "audio/ogg",
+    },
+    ExtensionInfo {
+        extension: "opus",
+        codec: Codec::Opus,
+        content_type: "audio/ogg; codecs=\"opus\"",
+        download_content_type: "audio/ogg",
+    },
+    ExtensionInfo {
+        extension: "wav",
+        codec: Codec::Wav,
+        content_type: "audio/wav",
+        download_content_type: "audio/wav",
+    },
+    ExtensionInfo {
+        extension: "ape",
+        codec: Codec::Ape,
+        content_type: "audio/x-ape",
+        download_content_type: "audio/x-ape",
+    },
+    ExtensionInfo {
+        extension: "eac3",
+        codec: Codec::Ec3,
+        content_type: "audio/mp4; codecs=\"ec-3\"",
+        download_content_type: "audio/eac3",
+    },
+    ExtensionInfo {
+        extension: "ec3",
+        codec: Codec::Ec3,
+        content_type: "audio/mp4; codecs=\"ec-3\"",
+        download_content_type: "audio/eac3",
+    },
+    ExtensionInfo {
+        extension: "joc",
+        codec: Codec::Ec3,
+        content_type: "audio/mp4; codecs=\"ec-3\"",
+        download_content_type: "audio/eac3",
+    },
+    ExtensionInfo {
+        extension: "ac3",
+        codec: Codec::Ac3,
+        content_type: "audio/mp4; codecs=\"ac-3\"",
+        download_content_type: "audio/ac3",
+    },
+    ExtensionInfo {
+        extension: "ac4",
+        codec: Codec::Ac4,
+        content_type: "audio/mp4; codecs=\"ac-4\"",
+        download_content_type: "audio/ac4",
+    },
+    ExtensionInfo {
+        extension: "dts",
+        codec: Codec::Dts,
+        content_type: "audio/vnd.dts",
+        download_content_type: "audio/vnd.dts",
+    },
+    ExtensionInfo {
+        extension: "dtsx",
+        codec: Codec::Dtsx,
+        content_type: "audio/vnd.dts.hd; codecs=\"dtsx\"",
+        download_content_type: "audio/vnd.dts.hd",
+    },
+    ExtensionInfo {
+        extension: "nac",
+        codec: Codec::Nac,
+        content_type: "audio/x-nac",
+        download_content_type: "application/octet-stream",
+    },
+];
+
+fn extension_info(extension: &str) -> Option<ExtensionInfo> {
+    EXTENSION_INFO
+        .iter()
+        .copied()
+        .find(|info| info.extension == extension)
+}
+
+fn extension_info_for_codec(codec: Codec) -> Option<ExtensionInfo> {
+    EXTENSION_INFO
+        .iter()
+        .copied()
+        .find(|info| info.codec == codec)
 }
 #[derive(Clone)]
 struct Audio {
@@ -715,13 +878,24 @@ impl Audio {
             .next()
             .unwrap_or("")
             .to_ascii_lowercase();
-        if extension == "mp4" || extension == "m4a" {
-            if extension == "m4a" {
-                return Codec::Aac;
-            }
-            return Codec::Unknown;
-        }
-        Codec::from_name(&extension).unwrap_or(Codec::Unknown)
+        extension_info(&extension)
+            .map(|info| info.codec)
+            .or_else(|| Codec::from_name(&extension))
+            .unwrap_or(Codec::Unknown)
+    }
+    fn content_type(&self, quality: Quality) -> &'static str {
+        let codec = self.codec(quality);
+        let extension = self
+            .url
+            .path()
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        extension_info(&extension)
+            .filter(|info| info.codec == codec)
+            .map(|info| info.content_type)
+            .unwrap_or_else(|| codec.content_type())
     }
     fn format(&self, quality: Quality, file: &Value) -> &'static str {
         if quality.is_dolby() {
@@ -785,12 +959,7 @@ impl QualityRow {
             let codec = audio.codec(quality);
             row.playback = quality.playback(codec);
             row.codec = codec.name();
-            row.content_type =
-                if codec == Codec::Aac && audio.url.path().to_ascii_lowercase().ends_with(".aac") {
-                    "audio/aac"
-                } else {
-                    codec.content_type()
-                };
+            row.content_type = audio.content_type(quality);
         }
         row
     }
@@ -802,10 +971,15 @@ struct Qualities {
 #[derive(Default, Deserialize)]
 struct QualityQuery {
     quality: Option<Quality>,
+    basic: Option<u8>,
+    probe: Option<u8>,
 }
 impl QualityQuery {
     fn quality(&self) -> Quality {
         self.quality.unwrap_or(Quality::Hq)
+    }
+    fn basic(&self) -> bool {
+        self.basic == Some(1) || self.probe == Some(0)
     }
 }
 fn string(v: &Value) -> String {
@@ -955,10 +1129,11 @@ async fn info(
 async fn qualities(
     State(state): State<Arc<AppState>>,
     Path(mid): Path<String>,
+    Query(query): Query<QualityQuery>,
 ) -> ApiResult<Json<Qualities>> {
     let qq = adapter(&state)?;
     check_mid(&mid)?;
-    Ok(Json(qq.qualities(&mid).await?))
+    Ok(Json(qq.qualities(&mid, query.basic()).await?))
 }
 async fn play(
     State(state): State<Arc<AppState>>,
@@ -987,39 +1162,18 @@ fn download_disposition(song: &Song, url: &reqwest::Url) -> String {
         .next()
         .filter(|s| !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_alphanumeric()))
         .unwrap_or("m4a");
-    let base = format!("{} - {}", song.artists.join(", "), song.name);
-    let base: String = base
-        .chars()
-        .filter(|c| !c.is_control() && !"/\\:*?\"<>|".contains(*c))
-        .take(160)
-        .collect();
-    let name = format!("{base}.{ext}");
-    let encoded: String = name.bytes().map(|b| format!("%{b:02X}")).collect();
-    format!("attachment; filename=\"download.{ext}\"; filename*=UTF-8''{encoded}")
+    attachment(&safe_basename(song), ext)
 }
 fn download_content_type(url: &reqwest::Url) -> &'static str {
-    match url
+    let extension = url
         .path()
         .rsplit('.')
         .next()
         .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "mp3" => "audio/mpeg",
-        "flac" => "audio/flac",
-        "m4a" | "mp4" => "audio/mp4",
-        "aac" => "audio/aac",
-        "ogg" | "opus" => "audio/ogg",
-        "wav" => "audio/wav",
-        "ape" => "audio/x-ape",
-        "eac3" | "ec3" | "joc" => "audio/eac3",
-        "ac3" => "audio/ac3",
-        "ac4" => "audio/ac4",
-        "dts" => "audio/vnd.dts",
-        "dtsx" => "audio/vnd.dts.hd",
-        _ => "application/octet-stream",
-    }
+        .to_ascii_lowercase();
+    extension_info(&extension)
+        .map(|info| info.download_content_type)
+        .unwrap_or("application/octet-stream")
 }
 #[derive(Default, Deserialize)]
 struct RawLyricsQuery {
@@ -1033,26 +1187,71 @@ fn raw_lyrics_kind(kind: Option<&str>) -> ApiResult<&'static str> {
         _ => Err(bad()),
     }
 }
-fn lyrics_filename(song: &Song, kind: &str) -> String {
-    let suffix = match kind {
-        "qrc" => ".qrc",
-        "qrctrans" => " (翻译).lrc",
-        "qrcroma" => " (注音).qrc",
-        _ => unreachable!("validated raw lyric kind"),
+fn safe_basename(song: &Song) -> String {
+    let artists = song.artists.join(", ");
+    let raw = match (artists.is_empty(), song.name.is_empty()) {
+        (false, false) => format!("{artists} - {}", song.name),
+        (false, true) => artists,
+        (true, false) => song.name.clone(),
+        (true, true) => song.id.clone(),
     };
-    let base = format!("{} - {}", song.artists.join(", "), song.name);
-    let base: String = base
+    let base: String = raw
         .chars()
         .filter(|c| !c.is_control() && !"/\\:*?\"<>|".contains(*c))
         .take(160)
         .collect();
-    format!("{base}{suffix}")
+    let mut base = base
+        .trim_matches(|c: char| c.is_whitespace() || c == '.')
+        .to_owned();
+    if base.is_empty() {
+        base = song.id.clone();
+    }
+    if matches!(
+        base.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        base.push('_');
+    }
+    base
 }
-fn lyrics_disposition(song: &Song, kind: &str) -> String {
-    let name = lyrics_filename(song, kind);
-    let ext = name.rsplit('.').next().unwrap_or("txt");
+fn attachment(base: &str, ext: &str) -> String {
+    let name = format!("{base}.{ext}");
     let encoded: String = name.bytes().map(|b| format!("%{b:02X}")).collect();
     format!("attachment; filename=\"download.{ext}\"; filename*=UTF-8''{encoded}")
+}
+fn lyrics_filename(song: &Song, kind: &str) -> (String, &'static str) {
+    let (suffix, extension) = match kind {
+        "qrc" => ("", "qrc"),
+        "qrctrans" => (".trans", "lrc"),
+        "qrcroma" => (".roma", "qrc"),
+        _ => unreachable!("validated raw lyric kind"),
+    };
+    (format!("{}{suffix}", safe_basename(song)), extension)
+}
+fn lyrics_disposition(song: &Song, kind: &str) -> String {
+    let (base, ext) = lyrics_filename(song, kind);
+    attachment(&base, ext)
 }
 async fn download(
     State(state): State<Arc<AppState>>,

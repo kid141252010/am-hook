@@ -85,28 +85,30 @@ export function rawLyricsUrl(id, kind) {
   if (!RAW_LYRIC_KINDS.includes(kind)) throw new Error('Invalid QQ raw lyric kind');
   return `/qq/song/${mid(id)}/lyrics/raw?kind=${kind}`;
 }
-export const coverUrl = (albumMid) => `/qq/cover/${mid(albumMid)}`;
+export const coverUrl = (albumMid) => albumMid === '' ? '' : `/qq/cover/${mid(albumMid)}`;
 /** photo_new only serves discrete sizes. Resolve before Apple-sized consumers see it. */
-export function artworkUrl(artwork) {
+export function artworkUrl(artwork, albumMid) {
+  if (albumMid !== undefined && !MID.test(String(albumMid))) return '';
   const url = typeof artwork === 'string' ? artwork : artwork?.url;
   return typeof url === 'string' ? url.replaceAll('{w}', '500').replaceAll('{h}', '500') : '';
 }
 export function toTrack(dto) {
   const id = mid(dto.id);
-  const albumMid = MID.test(dto.albumMid || '') ? dto.albumMid : id;
+  const albumMid = MID.test(dto.albumMid || '') ? dto.albumMid : '';
   const artists = (Array.isArray(dto.artists) ? dto.artists : []).filter((a) => typeof a === 'string').map((name) => ({ name, href: '' }));
   return withIdentity({
     source: 'qq', kind: 'song', id, name: String(dto.name || ''), title: String(dto.name || ''),
     artists, artist: artists.map((a) => a.name).join(' / '), album: String(dto.album || ''),
     albumId: albumMid, albumHref: '', href: songPath(id), country: '',
     duration: Number.isFinite(dto.durationMs) ? Math.max(0, dto.durationMs) : 0,
-    artwork: { url: artworkUrl(dto.cover) }, explicit: false,
+    artwork: { url: albumMid ? artworkUrl(dto.cover, albumMid) : '' }, explicit: false,
     qq: { mid: id, albumMid, vip: dto.vip === true, ttml: dto.ttml === true },
   });
 }
 export function entryOf(track) {
-  return withIdentity({ ...track, track: track.id, artwork: artworkUrl(track.artwork),
-    artworkFetchUrl: coverUrl(track.qq?.albumMid ?? track.albumId ?? track.id) });
+  const albumMid = track.qq?.albumMid || '';
+  return withIdentity({ ...track, track: track.id, artwork: albumMid ? artworkUrl(track.artwork, albumMid) : '',
+    artworkFetchUrl: albumMid ? coverUrl(albumMid) : '' });
 }
 export function qualityEntry(track, quality = currentQuality, row) {
   return { ...entryOf(track), quality: qualityId(quality), ...playbackInfo(quality, row) };
@@ -152,8 +154,9 @@ export function qualityRows(data, id, detect, environment = globalThis) {
       ...(playable ? { playUrl: playUrl(id, quality) } : {}) };
   });
 }
-export async function qualities(id, signal) {
-  return qualityRows(await request(`/qq/song/${mid(id)}/qualities`, signal), id);
+export async function qualities(id, signal, { basic = false } = {}) {
+  const query = basic ? '?basic=1' : '';
+  return qualityRows(await request(`/qq/song/${mid(id)}/qualities${query}`, signal), id);
 }
 const DEFAULT_QUALITY = { hires: 'RS', lossless: 'SQ', dolby: 'DAEAC3', high: 'HQ', standard: 'WEB' };
 /** Pure: normalized /qualities rows + preference → row | null.

@@ -38,7 +38,7 @@ function detailPage(t, { qualities = defaultQualities, failQualities = false, na
   globalThis.MediaSource = { isTypeSupported: () => true };
   globalThis.fetch = async (path) => ({ ok: !failQualities || !path.endsWith('/qualities'), status: 503,
     json: async () => path.endsWith('/qualities') ? { qualities }
-      : path.endsWith('/lyrics') ? { candidates: [] } : { id: 'test', name: 'Test', cover } });
+      : path.endsWith('/lyrics') ? { candidates: [] } : { id: 'test', name: 'Test', albumMid: '003DFRzD192KKD', cover } });
   mount({ root, url: new URL('https://am.test/qq-song/test'), signal: controller.signal,
     player, onLangChange: (fn) => { rerender = fn; }, toast() {} });
   return { root, local, played, queued, rerender: () => rerender() };
