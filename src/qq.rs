@@ -433,78 +433,51 @@ fn track_info<'a>(mid: &str, data: &'a Value) -> &'a Value {
         .unwrap_or_else(|| data.get("data").unwrap_or(data));
     raw.get("track_info").unwrap_or(raw)
 }
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "UPPERCASE")]
-enum Quality {
-    Mp3128,
-    Aac48,
-    Web,
-    Aac192,
-    Ogg96,
-    Ogg192,
-    Hq,
-    Nac,
-    Sq,
-    Rs,
-    Qai,
-    Q360v1,
-    Q360v2,
-    Ra360,
-    Dts,
-    Dtsx,
-    Da,
-    Daeac3,
-    Da448,
-    Da1500,
-}
-// The supplied 19+ tier table contains twenty distinct, verified API codes.
-const QUALITY_LIST: [Quality; 20] = [
-    Quality::Mp3128,
-    Quality::Aac48,
-    Quality::Web,
-    Quality::Aac192,
-    Quality::Ogg96,
-    Quality::Ogg192,
-    Quality::Hq,
-    Quality::Nac,
-    Quality::Sq,
-    Quality::Rs,
-    Quality::Qai,
-    Quality::Q360v1,
-    Quality::Q360v2,
-    Quality::Ra360,
-    Quality::Dts,
-    Quality::Dtsx,
-    Quality::Da,
-    Quality::Daeac3,
-    Quality::Da448,
-    Quality::Da1500,
-];
-impl Quality {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Mp3128 => "MP3128",
-            Self::Aac48 => "AAC48",
-            Self::Web => "WEB",
-            Self::Aac192 => "AAC192",
-            Self::Ogg96 => "OGG96",
-            Self::Ogg192 => "OGG192",
-            Self::Hq => "HQ",
-            Self::Nac => "NAC",
-            Self::Sq => "SQ",
-            Self::Rs => "RS",
-            Self::Qai => "QAI",
-            Self::Q360v1 => "Q360V1",
-            Self::Q360v2 => "Q360V2",
-            Self::Ra360 => "RA360",
-            Self::Dts => "DTS",
-            Self::Dtsx => "DTSX",
-            Self::Da => "DA",
-            Self::Daeac3 => "DAEAC3",
-            Self::Da448 => "DA448",
-            Self::Da1500 => "DA1500",
+macro_rules! define_qualities {
+    ($( $variant:ident => $name:literal ),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+        enum Quality {
+            $(#[serde(rename = $name)] $variant,)+
         }
-    }
+
+        // The supplied 19+ tier table contains twenty distinct, verified API codes.
+        const QUALITY_LIST: [Quality; 20] = [$(Quality::$variant),+];
+
+        impl Quality {
+            fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+        }
+    };
+}
+
+// Keep the API spelling, serde spelling and request spelling in one declaration.
+// This preserves the old `rename_all = "UPPERCASE"` JSON exactly.
+define_qualities! {
+    Mp3128 => "MP3128",
+    Aac48 => "AAC48",
+    Web => "WEB",
+    Aac192 => "AAC192",
+    Ogg96 => "OGG96",
+    Ogg192 => "OGG192",
+    Hq => "HQ",
+    Nac => "NAC",
+    Sq => "SQ",
+    Rs => "RS",
+    Qai => "QAI",
+    Q360v1 => "Q360V1",
+    Q360v2 => "Q360V2",
+    Ra360 => "RA360",
+    Dts => "DTS",
+    Dtsx => "DTSX",
+    Da => "DA",
+    Daeac3 => "DAEAC3",
+    Da448 => "DA448",
+    Da1500 => "DA1500",
+}
+impl Quality {
     fn cache_key(self, mid: &str) -> String {
         format!("{mid}:{}", self.name())
     }
@@ -576,6 +549,19 @@ impl Quality {
             codec.playback()
         }
     }
+    fn playback_class(self) -> &'static str {
+        // AC-4 is selected by browser capability probing. Keep that runtime
+        // decision out of this static contract while retaining its codec/MIME.
+        if matches!(self, Self::Da | Self::Da448 | Self::Da1500) {
+            "ac-4-probe"
+        } else {
+            match self.playback(self.default_codec()) {
+                Playback::Native => "native",
+                Playback::Joc => "joc",
+                Playback::Download => "download",
+            }
+        }
+    }
     fn format(self) -> &'static str {
         if let Some(field) = self.size_field() {
             if let Some((_, format)) = FILE_FORMATS.iter().find(|(name, _)| *name == field) {
@@ -588,6 +574,29 @@ impl Quality {
             Self::Da448 => "AC-4 A-JOC 448 kbps",
             Self::Da1500 => "AC-4 A-JOC 1500 kbps",
             _ => self.default_codec().format(),
+        }
+    }
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QualityCapability {
+    quality: Quality,
+    default_codec: &'static str,
+    content_type: &'static str,
+    playback_class: &'static str,
+    size_field: Option<&'static str>,
+    display_name: &'static str,
+}
+impl QualityCapability {
+    fn from_quality(quality: Quality) -> Self {
+        let codec = quality.default_codec();
+        Self {
+            quality,
+            default_codec: codec.name(),
+            content_type: codec.content_type(),
+            playback_class: quality.playback_class(),
+            size_field: quality.size_field(),
+            display_name: quality.format(),
         }
     }
 }
@@ -1037,15 +1046,27 @@ fn adapter(state: &AppState) -> ApiResult<&Qq> {
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
+    unlimited_routes().merge(limited_routes())
+}
+
+/// QQ endpoints that can fan out upstream requests or stream a whole track.
+/// The caller applies the existing per-client middleware to this router.
+pub fn limited_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/qq/search", get(search))
+        .route("/qq/song/:mid/download", get(download))
+        .route("/qq/song/:mid/qualities", get(qualities))
+}
+
+/// QQ endpoints whose response size and upstream request count are bounded by
+/// the normal song/lyrics/cache behavior and do not use client-rate limiting.
+pub fn unlimited_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route("/qq/cover/:albumMid", get(cover))
         .route("/qq/song/:mid", get(info))
         .route("/qq/song/:mid/play", get(play))
-        .route("/qq/song/:mid/download", get(download))
         .route("/qq/song/:mid/lyrics", get(lyrics))
         .route("/qq/song/:mid/lyrics/raw", get(raw_lyrics))
-        .route("/qq/song/:mid/qualities", get(qualities))
         .route("/qq/capabilities", get(capabilities))
 }
 async fn cover(
@@ -1076,7 +1097,11 @@ fn cover_response(response: reqwest::Response) -> ApiResult<Response> {
 }
 async fn capabilities(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
     adapter(&state)?;
-    Ok(Json(json!({"enabled": true, "qualities": QUALITY_LIST})))
+    let qualities = QUALITY_LIST
+        .into_iter()
+        .map(QualityCapability::from_quality)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({"enabled": true, "qualities": qualities})))
 }
 async fn search(
     State(state): State<Arc<AppState>>,

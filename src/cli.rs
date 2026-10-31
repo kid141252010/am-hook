@@ -60,13 +60,13 @@ pub struct Cli {
     #[arg(long, env = "AM_HOOK_QQ_PROXY", hide_env_values = true)]
     pub qq_proxy: Option<String>,
 
-    /// Max wrapper-lite requests relayed per client IP in any 60 seconds (/status not
-    /// counted); further requests get HTTP 429 with Retry-After. 0 = unlimited
+    /// Max wrapper-lite and selected QQ requests per client IP in any 60 seconds
+    /// (/status not counted); further requests get HTTP 429 with Retry-After. 0 = unlimited
     #[arg(long, default_value_t = 0)]
     pub client_rate: u32,
 
-    /// Max wrapper-lite requests relayed at once per client IP (/status not counted);
-    /// further requests wait, so one visitor's burst cannot hold every
+    /// Max wrapper-lite and selected QQ requests at once per client IP (/status not
+    /// counted); further requests wait, so one visitor's burst cannot hold every
     /// --wrapper-concurrency permit. 0 = unlimited
     #[arg(long, default_value_t = 0)]
     pub client_concurrency: usize,

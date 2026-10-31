@@ -1,6 +1,7 @@
-//! Socket-free tests for the QQ adapter; included as unit tests to exercise private DTOs.
+//! QQ adapter unit tests, including local axum upstream contract checks.
 use super::*;
-use axum::{body::to_bytes, http::Request};
+use axum::{body::to_bytes, http::Request, routing::any, Router};
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 fn cli(args: &[&str]) -> crate::cli::Cli {
@@ -989,6 +990,21 @@ fn state(enabled: bool) -> Arc<AppState> {
     config.qq_api = enabled.then(|| "https://example.invalid/api/web".into());
     Arc::new(AppState::with_config(config))
 }
+
+async fn serve_local(app: Router) -> Option<(String, tokio::task::JoinHandle<()>)> {
+    // Some managed test sandboxes deny loopback binds. CI runs the same tests
+    // with sockets enabled; a denied bind is reported and skipped locally.
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("skipping loopback QQ mock: {error}");
+            return None;
+        }
+    };
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    Some((url, task))
+}
 async fn get(state: Arc<AppState>, uri: &str) -> Response {
     crate::router(state)
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -1015,10 +1031,25 @@ async fn proxy_is_not_exposed_in_capabilities_or_host_config() {
         assert!(!body.contains("11080"));
         assert!(!body.to_ascii_lowercase().contains("qqproxy"));
         if path == "/qq/capabilities" {
-            assert_eq!(
-                serde_json::from_str::<Value>(&body).unwrap(),
-                json!({"enabled":true,"qualities":["MP3128", "AAC48", "WEB", "AAC192", "OGG96", "OGG192", "HQ", "NAC", "SQ", "RS", "QAI", "Q360V1", "Q360V2", "RA360", "DTS", "DTSX", "DA", "DAEAC3", "DA448", "DA1500"]})
-            );
+            let value: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(value["enabled"], true);
+            let qualities = value["qualities"].as_array().unwrap();
+            assert_eq!(qualities.len(), 20);
+            assert_eq!(qualities[0]["quality"], "MP3128");
+            assert_eq!(qualities[0]["defaultCodec"], "mp3");
+            assert_eq!(qualities[0]["contentType"], "audio/mpeg");
+            assert_eq!(qualities[0]["playbackClass"], "native");
+            assert_eq!(qualities[0]["sizeField"], "size_128mp3");
+            assert_eq!(qualities[0]["displayName"], "MP3 128 kbps");
+            let ac4 = qualities.iter().find(|row| row["quality"] == "DA").unwrap();
+            assert_eq!(ac4["defaultCodec"], "ac-4");
+            assert_eq!(ac4["contentType"], "audio/mp4; codecs=\"ac-4\"");
+            assert_eq!(ac4["playbackClass"], "ac-4-probe");
+            assert_eq!(ac4["sizeField"], "size_dolby");
+            let joc = qualities.iter().find(|row| row["quality"] == "DAEAC3").unwrap();
+            assert_eq!(joc["defaultCodec"], "ec-3");
+            assert_eq!(joc["playbackClass"], "joc");
+            assert_eq!(joc["sizeField"], "size_dolby");
         }
     }
 }
@@ -1222,6 +1253,69 @@ async fn playback_redirect_has_no_audio_or_json_body() {
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn download_upstream_non_2xx_returns_502() {
+    let upstream = Router::new().fallback(any(|| async { StatusCode::BAD_GATEWAY }));
+    let Some((base, task)) = serve_local(upstream).await else {
+        return;
+    };
+    let state = state(true);
+    let qq = state.qq.as_ref().unwrap();
+    let mid = "downloadtest";
+    qq.songs.put(
+        mid.into(),
+        Song {
+            id: mid.into(),
+            name: "Song".into(),
+            artists: vec!["Artist".into()],
+            album: "Album".into(),
+            album_mid: "album".into(),
+            duration_ms: 1000,
+            cover: String::new(),
+            vip: false,
+            ttml: false,
+        },
+    );
+    qq.audio.put(
+        Quality::Hq.cache_key(mid),
+        Audio {
+            url: reqwest::Url::parse(&format!("{base}/track.mp3")).unwrap(),
+            size_bytes: Some(4),
+            codec_hint: None,
+        },
+    );
+    let response = get(state, &format!("/qq/song/{mid}/download?quality=HQ")).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    task.abort();
+}
+
+#[tokio::test]
+async fn media_redirect_to_non_allowlisted_host_stops_at_302() {
+    let upstream = Router::new().fallback(any(|| async {
+        Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, "https://evil.example.invalid/audio.mp3")
+            .body(Body::empty())
+            .unwrap()
+    }));
+    let Some((base, task)) = serve_local(upstream).await else {
+        return;
+    };
+    let response = qq()
+        .media
+        .get(format!("{base}/start"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        "https://evil.example.invalid/audio.mp3"
+    );
+    task.abort();
+}
+
 #[test]
 fn download_filename_uses_metadata_and_keeps_the_cdn_extension() {
     let mut song = qq().song_dto(&raw_song()).unwrap();

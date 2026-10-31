@@ -37,9 +37,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         // 按客户端 IP 限流（--client-rate），在 require_relay 之内
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), limit::limit_clients))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), ui::require_relay));
+    let qq = if state.qq.is_some() {
+        qq::unlimited_routes().merge(
+            qq::limited_routes()
+                .route_layer(axum::middleware::from_fn_with_state(state.clone(), limit::limit_clients)),
+        )
+    } else {
+        Router::new()
+    };
     router
         .merge(relay)
-        .merge(if state.qq.is_some() { qq::routes() } else { Router::new() })
+        .merge(qq)
         .route(assets::HOST_JS, get(ui::host_js_handler))
         .route("/", get(ui::app_handler))
         // 「新发现」（官网 /{cc}/new，这里跟随主地区）
