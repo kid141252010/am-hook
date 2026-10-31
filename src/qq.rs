@@ -48,6 +48,18 @@ fn network(error: reqwest::Error) -> QqError {
     tracing::warn!(error = %error.without_url(), "qq network request failed");
     unavailable()
 }
+
+enum RequestError {
+    Upstream(StatusCode),
+    Network,
+    Decode,
+}
+
+impl RequestError {
+    fn api(self) -> QqError {
+        unavailable()
+    }
+}
 pub fn valid_mid(mid: &str) -> bool {
     !mid.is_empty() && mid.len() <= 32 && mid.bytes().all(|b| b.is_ascii_alphanumeric())
 }
@@ -197,21 +209,41 @@ impl Qq {
             lyrics: Cache::new(1024, 604800),
         })
     }
-    async fn request(&self, path: &str, params: &[(&str, String)]) -> ApiResult<Value> {
-        let _permit = self.permits.acquire().await.map_err(|_| unavailable())?;
+    async fn request_with_status(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+    ) -> Result<Value, RequestError> {
+        let _permit = self
+            .permits
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Network)?;
         let response = self
             .api
             .get(format!("{}{path}", self.base))
             .query(params)
             .send()
             .await
-            .map_err(network)?;
-        response
-            .error_for_status()
-            .map_err(network)?
-            .json()
+            .map_err(|error| {
+                tracing::warn!(error = %error.without_url(), "qq network request failed");
+                RequestError::Network
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            tracing::debug!(path, %status, "qq upstream returned non-success status");
+            return Err(RequestError::Upstream(status));
+        }
+        response.json().await.map_err(|error| {
+            tracing::debug!(error = %error.without_url(), "qq upstream response decode failed");
+            RequestError::Decode
+        })
+    }
+
+    async fn request(&self, path: &str, params: &[(&str, String)]) -> ApiResult<Value> {
+        self.request_with_status(path, params)
             .await
-            .map_err(network)
+            .map_err(RequestError::api)
     }
     fn song_dto(&self, raw: &Value) -> Option<Song> {
         let id = string(
@@ -342,10 +374,7 @@ impl Qq {
         if let Some(audio) = self.audio.get(&key) {
             return Ok(audio);
         }
-        if self.audio_failures.get(&key).is_some() {
-            return Err(unavailable());
-        }
-        let data = match self
+        let data = self
             .request(
                 "/extra/music/url",
                 &[
@@ -355,31 +384,56 @@ impl Qq {
                     ("audio_api", "2".into()),
                 ],
             )
-            .await
-        {
-            Ok(data) => data,
-            Err(error) => {
-                self.audio_failures.put(key, ());
-                return Err(error);
-            }
-        };
-        let audio = match Audio::from_response(&data) {
-            Ok(audio) => audio,
-            Err(error) => {
-                self.audio_failures.put(key, ());
-                return Err(error);
-            }
-        };
+            .await?;
+        let audio = Audio::from_response(&data)?;
         self.audio.put(key, audio.clone());
         Ok(audio)
     }
     async fn probe_audio_url(&self, mid: &str, quality: Quality) -> ApiResult<Audio> {
+        let key = quality.cache_key(mid);
+        if let Some(audio) = self.audio.get(&key) {
+            return Ok(audio);
+        }
+        if self.audio_failures.get(&key).is_some() {
+            return Err(unavailable());
+        }
         let _permit = self
             .probe_permits
             .acquire()
             .await
             .map_err(|_| unavailable())?;
-        self.audio_url(mid, quality).await
+        // A concurrent probe may have populated either cache while this call
+        // waited for the semaphore.
+        if let Some(audio) = self.audio.get(&key) {
+            return Ok(audio);
+        }
+        if self.audio_failures.get(&key).is_some() {
+            return Err(unavailable());
+        }
+        let data = self
+            .request_with_status(
+                "/extra/music/url",
+                &[
+                    ("platform", "qq".into()),
+                    ("mid", mid.into()),
+                    ("music_quality", quality.name().into()),
+                    ("audio_api", "2".into()),
+                ],
+            )
+            .await
+            .map_err(RequestError::api)?;
+        let audio = match Audio::from_response(&data) {
+            Ok(audio) if audio.size_bytes.is_some_and(|size| size > 0) => audio,
+            Ok(_) | Err(_) => {
+                // A successful upstream response with no usable URL/size is a
+                // deterministic absence of this tier. Transient request and
+                // upstream failures never enter this cache.
+                self.audio_failures.put(key, ());
+                return Err(unavailable());
+            }
+        };
+        self.audio.put(key, audio.clone());
+        Ok(audio)
     }
     async fn qualities(&self, mid: &str, basic: bool) -> ApiResult<Qualities> {
         // One info request supplies all size fields, shared with the song route.
@@ -1582,6 +1636,14 @@ fn qrc_lines(text: &str) -> Vec<LyricLine> {
     lines
 }
 const AUXILIARY_MAX_DISTANCE: u64 = 1000;
+// A skipped auxiliary row costs 700 ms.  This makes every allowed pair at
+// most 700 ms preferable to skipping it, while still allowing the DP to skip
+// a badly timed row when doing so enables better later matches.
+const AUXILIARY_SKIP_PENALTY: u64 = 700;
+// A nearby ordinary row owns a competing candidate before a BG row.  This is
+// only a BG reservation rule; ordinary rows still accept the full 1000ms DP
+// matching limit.
+const AUXILIARY_BG_PRIORITY_WINDOW: u64 = 500;
 
 struct AuxiliaryLine {
     start: u64,
@@ -1606,38 +1668,229 @@ fn auxiliary_lines(lines: Vec<LyricLine>) -> Vec<AuxiliaryLine> {
 }
 
 fn align_auxiliary(lines: &[LyricLine], auxiliary: Vec<LyricLine>) -> Vec<Option<String>> {
-    let auxiliary = auxiliary_lines(auxiliary);
-    let mut candidates = Vec::new();
-    for (auxiliary_index, auxiliary_line) in auxiliary.iter().enumerate() {
-        for (line_index, line) in lines.iter().enumerate() {
-            let distance = auxiliary_line.start.abs_diff(line.start);
-            if distance <= AUXILIARY_MAX_DISTANCE {
-                // BG rows win equal-distance ties so a match remains nested in
-                // x-bg, as it was when attached BG rows were reserved first.
-                // Earlier target timestamps then provide deterministic ties.
-                candidates.push((
-                    distance,
-                    !line.is_bg,
-                    line.start,
-                    auxiliary_line.start,
-                    auxiliary_index,
-                    line_index,
-                ));
+    let mut auxiliary = auxiliary_lines(auxiliary);
+    if lines.is_empty() || auxiliary.is_empty() {
+        return vec![None; lines.len()];
+    }
+    auxiliary.sort_by_key(|line| line.start);
+
+    // `state` is the number of the last matched main row (zero means that no
+    // main row has been matched yet).  Main rows stay in their existing order;
+    // only auxiliary rows are sorted by timestamp.  A match can therefore
+    // only transition from a state <= the target row, which makes crossings
+    // impossible while leaving unmatched main rows free of charge.
+    #[derive(Clone, Copy)]
+    struct DpValue {
+        cost: u64,
+        last_distance: u64,
+        last_main: usize,
+    }
+    #[derive(Clone, Copy)]
+    struct Parent {
+        previous: usize,
+        matched: bool,
+    }
+    #[derive(Clone, Copy)]
+    struct Candidate {
+        value: DpValue,
+        parent: Parent,
+        action_distance: Option<u64>,
+    }
+
+    const INF: u64 = u64::MAX / 4;
+    let main_count = lines.len();
+    let no_main = usize::MAX;
+    let initial = DpValue {
+        cost: 0,
+        last_distance: INF,
+        last_main: no_main,
+    };
+
+    // A path with a lower cost wins. For equal costs, compare the current
+    // match's distance and main-row order first; otherwise retain the earlier
+    // match already present in the path. This makes equal-cost choices stable.
+    let better_value = |left: DpValue, right: DpValue| {
+        (left.cost, left.last_distance, left.last_main)
+            < (right.cost, right.last_distance, right.last_main)
+    };
+    let better_candidate = |left: Candidate, right: Candidate| {
+        if left.value.cost != right.value.cost {
+            return left.value.cost < right.value.cost;
+        }
+        match (left.action_distance, right.action_distance) {
+            (Some(left_distance), Some(right_distance)) => {
+                (left_distance, left.value.last_main, left.parent.previous)
+                    < (right_distance, right.value.last_main, right.parent.previous)
+            }
+            (Some(left_distance), None) => {
+                (left_distance, left.value.last_main)
+                    < (right.value.last_distance, right.value.last_main)
+            }
+            (None, Some(right_distance)) => {
+                (left.value.last_distance, left.value.last_main)
+                    <= (right_distance, right.value.last_main)
+            }
+            (None, None) => better_value(left.value, right.value),
+        }
+    };
+
+    let distance = |auxiliary_line: &AuxiliaryLine, line: &LyricLine| {
+        // A timestamp inside a timed main line belongs to that line even when
+        // its line-start anchors differ.  Outside the interval, use the
+        // anchor difference required by the DP cost model.
+        if auxiliary_line.start >= line.start && auxiliary_line.start <= line.end {
+            0
+        } else {
+            auxiliary_line.start.abs_diff(line.start)
+        }
+    };
+
+    let unreachable = DpValue {
+        cost: INF,
+        last_distance: INF,
+        last_main: no_main,
+    };
+    let mut previous = vec![unreachable; main_count + 1];
+    previous[0] = initial;
+    let mut parents = Vec::with_capacity(auxiliary.len());
+    for auxiliary_line in &auxiliary {
+        // For a BG target, an available ordinary row gets the translation
+        // first.  Once every ordinary row after the current path has been
+        // consumed, the BG row can receive its own later auxiliary row.
+        let mut ordinary_available = vec![false; main_count + 1];
+        for index in (0..main_count).rev() {
+            ordinary_available[index] = ordinary_available[index + 1]
+                || (!lines[index].is_bg
+                    && distance(auxiliary_line, &lines[index])
+                        <= AUXILIARY_BG_PRIORITY_WINDOW);
+        }
+
+        let mut next = vec![DpValue {
+            cost: INF,
+            last_distance: INF,
+            last_main: no_main,
+        }; main_count + 1];
+        let mut layer_parents = vec![
+            Parent {
+                previous: 0,
+                matched: false,
+            };
+            main_count + 1
+        ];
+        let mut prefix_best = vec![0; main_count];
+        let mut best = 0;
+        for index in 0..main_count {
+            if better_value(previous[index], previous[best]) {
+                best = index;
+            }
+            prefix_best[index] = best;
+        }
+        let mut bg_prefix_best = vec![None; main_count];
+        let mut best_bg = None;
+        for index in 0..main_count {
+            if !ordinary_available[index]
+                && previous[index].cost != INF
+                && best_bg.is_none_or(|candidate| {
+                    better_value(previous[index], previous[candidate])
+                })
+            {
+                best_bg = Some(index);
+            }
+            bg_prefix_best[index] = best_bg;
+        }
+
+        // Skipping the auxiliary row leaves the last matched main row alone.
+        for state in 0..=main_count {
+            if previous[state].cost == INF {
+                continue;
+            }
+            let candidate = Candidate {
+                value: DpValue {
+                    cost: previous[state].cost.saturating_add(AUXILIARY_SKIP_PENALTY),
+                    ..previous[state]
+                },
+                parent: Parent {
+                    previous: state,
+                    matched: false,
+                },
+                action_distance: None,
+            };
+            let current = Candidate {
+                value: next[state],
+                parent: layer_parents[state],
+                action_distance: None,
+            };
+            if next[state].cost == INF || better_candidate(candidate, current) {
+                next[state] = candidate.value;
+                layer_parents[state] = candidate.parent;
             }
         }
-    }
-    candidates.sort_unstable();
 
-    let mut used_auxiliary = vec![false; auxiliary.len()];
-    let mut used_lines = vec![false; lines.len()];
-    let mut aligned = vec![None; lines.len()];
-    for (_, _, _, _, auxiliary_index, line_index) in candidates {
-        if used_auxiliary[auxiliary_index] || used_lines[line_index] {
-            continue;
+        // Matching row `index` consumes a prefix state whose last main row is
+        // before it. The prefix minimum makes this DP O(auxiliary * main).
+        // The hard limit is checked against the row anchors even when an
+        // auxiliary stamp falls inside a timed main interval.
+        for index in 0..main_count {
+            if auxiliary_line.start.abs_diff(lines[index].start) > AUXILIARY_MAX_DISTANCE {
+                continue;
+            }
+            let match_distance = distance(auxiliary_line, &lines[index]);
+            let source = if lines[index].is_bg {
+                let Some(source) = bg_prefix_best[index] else {
+                    continue;
+                };
+                source
+            } else {
+                prefix_best[index]
+            };
+            if previous[source].cost == INF {
+                continue;
+            }
+            let candidate = Candidate {
+                value: DpValue {
+                    cost: previous[source].cost.saturating_add(match_distance),
+                    last_distance: match_distance,
+                    last_main: index,
+                },
+                parent: Parent {
+                    previous: source,
+                    matched: true,
+                },
+                action_distance: Some(match_distance),
+            };
+            let state = index + 1;
+            let current = Candidate {
+                value: next[state],
+                parent: layer_parents[state],
+                action_distance: if layer_parents[state].matched {
+                    Some(next[state].last_distance)
+                } else {
+                    None
+                },
+            };
+            if next[state].cost == INF || better_candidate(candidate, current) {
+                next[state] = candidate.value;
+                layer_parents[state] = candidate.parent;
+            }
         }
-        used_auxiliary[auxiliary_index] = true;
-        used_lines[line_index] = true;
-        aligned[line_index] = Some(auxiliary[auxiliary_index].text.clone());
+
+        previous = next;
+        parents.push(layer_parents);
+    }
+
+    let mut state = 0;
+    for candidate in 1..=main_count {
+        if better_value(previous[candidate], previous[state]) {
+            state = candidate;
+        }
+    }
+    let mut aligned = vec![None; main_count];
+    for (auxiliary_index, layer) in parents.iter().enumerate().rev() {
+        let parent = layer[state];
+        if parent.matched {
+            aligned[state - 1] = Some(auxiliary[auxiliary_index].text.clone());
+        }
+        state = parent.previous;
     }
     aligned
 }
@@ -2015,6 +2268,12 @@ async fn fetch_amll_lyrics(qq: &Qq, mid: &str) -> LyricsSource<String> {
             };
         }
     };
+    if response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::NO_CONTENT {
+        return LyricsSource {
+            state: LyricsSourceState::None,
+            value: None,
+        };
+    }
     if !response.status().is_success() {
         tracing::debug!(status = %response.status(), "qq AMLL lyrics source failed");
         return LyricsSource {
@@ -2052,13 +2311,19 @@ async fn fetch_amll_lyrics(qq: &Qq, mid: &str) -> LyricsSource<String> {
 
 async fn fetch_ttml_lyrics(qq: &Qq, mid: &str) -> LyricsSource<String> {
     let raw = match qq
-        .request(
+        .request_with_status(
             "/lyric/ttml",
             &[("platform", "qq".into()), ("mid", mid.to_owned())],
         )
         .await
     {
         Ok(raw) => raw,
+        Err(RequestError::Upstream(StatusCode::NOT_FOUND)) => {
+            return LyricsSource {
+                state: LyricsSourceState::None,
+                value: None,
+            };
+        }
         Err(_) => {
             tracing::debug!("qq TTML lyrics source failed");
             return LyricsSource {
@@ -2087,13 +2352,19 @@ async fn fetch_ttml_lyrics(qq: &Qq, mid: &str) -> LyricsSource<String> {
 
 async fn fetch_new_lyrics(qq: &Qq, mid: &str) -> LyricsSource<Value> {
     let raw = match qq
-        .request(
+        .request_with_status(
             "/lyric/new",
             &[("platform", "qq".into()), ("id", mid.to_owned())],
         )
         .await
     {
         Ok(raw) => raw,
+        Err(RequestError::Upstream(StatusCode::NOT_FOUND)) => {
+            return LyricsSource {
+                state: LyricsSourceState::None,
+                value: None,
+            };
+        }
         Err(_) => {
             tracing::debug!("qq QRC lyrics source failed");
             return LyricsSource {
@@ -2121,18 +2392,18 @@ async fn fetch_lyrics(qq: &Qq, mid: &str) -> ApiResult<(Lyrics, Duration)> {
     // needed to filter QRC/LRC metadata, so a context failure does not fail lyrics.
     let context = async {
         if let Some(song) = qq.songs.get(mid) {
-            Some(song)
+            (Some(song), false)
         } else {
             match qq.song(mid).await {
-                Ok(song) => Some(song),
+                Ok(song) => (Some(song), false),
                 Err(_) => {
                     tracing::debug!("qq lyrics song context unavailable");
-                    None
+                    (None, true)
                 }
             }
         }
     };
-    let (amll, ttml, new, song) = tokio::join!(
+    let (amll, ttml, new, (song, context_failed)) = tokio::join!(
         fetch_amll_lyrics(qq, mid),
         fetch_ttml_lyrics(qq, mid),
         fetch_new_lyrics(qq, mid),
@@ -2140,6 +2411,7 @@ async fn fetch_lyrics(qq: &Qq, mid: &str) -> ApiResult<(Lyrics, Duration)> {
     );
     let mut candidates = Vec::new();
     let mut raw_lyrics = RawLyrics::default();
+    let mut context_failed_with_candidates = false;
     if let Some(text) = amll.value {
         candidates.push(Lyric {
             source: "amll",
@@ -2173,6 +2445,7 @@ async fn fetch_lyrics(qq: &Qq, mid: &str) -> ApiResult<(Lyrics, Duration)> {
             .map(str::to_owned);
         let candidate_count = candidates.len();
         candidates.extend(converted_lyrics_with_context(&raw, context));
+        context_failed_with_candidates = context_failed && candidates.len() > candidate_count;
         if candidates.len() == candidate_count {
             new_state = LyricsSourceState::None;
         }
@@ -2184,7 +2457,7 @@ async fn fetch_lyrics(qq: &Qq, mid: &str) -> ApiResult<(Lyrics, Duration)> {
     {
         return Err(unavailable());
     }
-    let ttl = if states.contains(&LyricsSourceState::Failed) {
+    let ttl = if states.contains(&LyricsSourceState::Failed) || context_failed_with_candidates {
         Duration::from_secs(300)
     } else if states.iter().all(|state| *state == LyricsSourceState::None) {
         Duration::from_secs(3600)

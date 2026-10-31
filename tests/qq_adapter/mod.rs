@@ -582,7 +582,7 @@ fn auxiliary_matching_uses_adaptive_nearest_neighbors() {
 }
 
 #[test]
-fn auxiliary_matching_resolves_competing_rows_by_distance() {
+fn auxiliary_matching_keeps_competing_rows_in_order() {
     let main = vec![
         test_line(1000, 1200, "first"),
         test_line(2000, 2200, "second"),
@@ -595,7 +595,87 @@ fn auxiliary_matching_resolves_competing_rows_by_distance() {
         ],
     );
     assert_eq!(aligned[0].as_deref(), Some("near first"));
-    assert_eq!(aligned[1].as_deref(), Some("far first"));
+    assert!(aligned[1].is_none());
+}
+
+#[test]
+fn auxiliary_matching_preserves_order_under_uniform_offset() {
+    let main = vec![test_line(0, 500, "first"), test_line(600, 1100, "second")];
+    let aligned = align_auxiliary(
+        &main,
+        vec![
+            test_line(350, 500, "A"),
+            test_line(950, 1100, "B"),
+        ],
+    );
+    assert_eq!(aligned[0].as_deref(), Some("A"));
+    assert_eq!(aligned[1].as_deref(), Some("B"));
+}
+
+#[test]
+fn auxiliary_matching_does_not_move_a_translation_to_a_missing_row() {
+    let main = vec![
+        test_line(0, 500, "first"),
+        test_line(600, 1100, "missing"),
+        test_line(1200, 1700, "third"),
+    ];
+    let aligned = align_auxiliary(
+        &main,
+        vec![test_line(350, 500, "only first"), test_line(1550, 1700, "third")],
+    );
+    assert_eq!(aligned[0].as_deref(), Some("only first"));
+    assert!(aligned[1].is_none());
+    assert_eq!(aligned[2].as_deref(), Some("third"));
+}
+
+#[test]
+fn auxiliary_matching_dp_enforces_distance_and_skip_boundaries() {
+    // The hard limit uses the line-start anchors. At exactly 1000 ms the
+    // pair is allowed, and the auxiliary timestamp at the main line's end
+    // has zero match cost because it falls inside that timed interval.
+    let at_max_distance = align_auxiliary(
+        &[test_line(1000, 2000, "main")],
+        vec![test_line(2000, 2100, "at max distance")],
+    );
+    assert_eq!(at_max_distance[0].as_deref(), Some("at max distance"));
+
+    let over_max_distance = align_auxiliary(
+        &[test_line(1000, 2000, "main")],
+        vec![test_line(2001, 2101, "over max distance")],
+    );
+    assert!(over_max_distance[0].is_none());
+
+    // With one isolated pair, matching wins while its distance is below the
+    // 700 ms skip penalty and loses once the distance is above it.
+    let below_skip_penalty = align_auxiliary(
+        &[test_line(1000, 1000, "main")],
+        vec![test_line(1699, 1799, "below skip penalty")],
+    );
+    assert_eq!(below_skip_penalty[0].as_deref(), Some("below skip penalty"));
+
+    let above_skip_penalty = align_auxiliary(
+        &[test_line(1000, 1000, "main")],
+        vec![test_line(1701, 1801, "above skip penalty")],
+    );
+    assert!(above_skip_penalty[0].is_none());
+}
+
+#[test]
+fn auxiliary_matching_breaks_equidistant_ties_by_earlier_main_row() {
+    let main = vec![test_line(1000, 1200, "first"), test_line(2000, 2200, "second")];
+    let aligned = align_auxiliary(&main, vec![test_line(1500, 1600, "tie")]);
+    assert_eq!(aligned[0].as_deref(), Some("tie"));
+    assert!(aligned[1].is_none());
+}
+
+#[test]
+fn auxiliary_matching_prioritizes_a_main_row_over_a_bg_row() {
+    let mut bg = test_line(1100, 1300, "background");
+    bg.is_bg = true;
+    let main = vec![test_line(1000, 1200, "main"), bg];
+    let aligned = align_auxiliary(&main, vec![test_line(1100, 1200, "translation")]);
+    assert_eq!(aligned[0].as_deref(), Some("translation"));
+    assert!(aligned[1].is_none());
 }
 
 #[test]
@@ -787,6 +867,29 @@ fn full_wet_lyric_new_aligns_available_auxiliary_text_without_changing_lrc() {
     ));
     assert!(!text.contains("LyricContent"));
     assert!(!text.contains("QrcInfos"));
+}
+
+#[test]
+fn puyi_lyric_new_attaches_all_translations_without_crossing_rows() {
+    let raw: Value =
+        serde_json::from_str(include_str!("../fixtures/qq_lyric_new_puyi.json")).unwrap();
+    let candidate = converted_lyrics_with_context(&raw, None)
+        .into_iter()
+        .find(|lyric| lyric.source == "qrc")
+        .unwrap();
+    assert_eq!(candidate.text.matches("ttm:role=\"x-translation\"").count(), 36);
+    for (start, translation) in [
+        ("94.530", "滋生着那些疯狂"),
+        ("29.790", "回到你带我进入的梦"),
+        ("92.010", "所有的想象"),
+    ] {
+        let row = candidate
+            .text
+            .split("<p ")
+            .find(|row| row.starts_with(&format!("begin=\"{start}\"")))
+            .unwrap_or_else(|| panic!("missing row {start}"));
+        assert!(row.contains(&format!("x-translation\">{translation}</span>")), "{row}");
+    }
 }
 
 #[test]
