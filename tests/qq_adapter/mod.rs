@@ -375,26 +375,147 @@ fn ttml_keeps_timing_translation_and_agents_but_removes_credits_and_urls() {
 #[test]
 fn lrc_fallback_handles_headers_offsets_repeated_stamps_and_xml_escaping() {
     let text = "[by:https://example.invalid/private]\n[offset:100]\n[00:01.00][00:03.00]A & B\n[00:05.0]Next";
-    let cleaned = lrc_ttml(text).unwrap();
+    let cleaned = lrc_ttml(text, None).unwrap();
     assert!(!cleaned.contains("example.invalid"));
     assert!(cleaned.contains("begin=\"1.100\" end=\"3.100\">A &amp; B"));
     assert!(cleaned.contains("begin=\"3.100\" end=\"5.100\">A &amp; B"));
-    assert!(lrc_ttml("[by:someone]\nno timestamps").is_none());
+    assert!(lrc_ttml("[by:someone]\nno timestamps", None).is_none());
 }
 #[test]
 fn qrc_word_timing_and_optional_fields_fall_through_safely() {
-    let cleaned =
-        qrc_ttml("[1000,500]你(1000,200)好(1200,300)\n[2000,1000]World(2000,1000)").unwrap();
+    let cleaned = qrc_ttml(
+        "[1000,500]你(1000,200)好(1200,300)\n[2000,1000]World(2000,1000)",
+        None,
+        None,
+    )
+    .unwrap();
     assert!(cleaned.contains("itunes:timing=\"Word\""));
     assert!(cleaned.contains("<p begin=\"1.000\" end=\"1.500\">"));
     assert!(cleaned.contains("<span begin=\"1.200\" end=\"1.500\">好</span>"));
-    assert!(qrc_ttml("encrypted-unavailable").is_none());
+    assert!(qrc_ttml("encrypted-unavailable", None, None).is_none());
     assert_eq!(
         field_text(&json!({"lrc":{"lyric":"[00:01]text"}}), "lrc"),
         Some("[00:01]text")
     );
     assert_eq!(field_text(&json!({"lrc":"[00:01]text"}), "qrc"), None);
 }
+fn wet_lyrics() -> Value {
+    // Reduced /lyric/new response for WET (001ATFiY3pb3y6): Korean QRC,
+    // Chinese LRC translation and romanized QRC XML. Text/times are synthetic.
+    serde_json::from_str(include_str!("../fixtures/qq_lyric_new_wet.json")).unwrap()
+}
+
+#[test]
+fn wet_lyric_new_aligns_translation_and_romanization_in_amll_inline_format() {
+    let raw = wet_lyrics();
+    let row_pattern = Regex::new(r"<p .*?</p>").unwrap();
+    for raw in [&raw, &raw["data"]] {
+        let candidates = converted_lyrics(raw);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].source, "qrc");
+        assert_eq!(candidates[1].source, "lrc");
+        let text = &candidates[0].text;
+        assert!(text.contains("xmlns:ttm=\"http://www.w3.org/ns/ttml#metadata\""));
+        assert!(text.contains("itunes:timing=\"Word\""));
+        let rows: Vec<_> = row_pattern
+            .find_iter(text)
+            .map(|row| row.as_str())
+            .collect();
+        assert_eq!(rows.len(), 4, "auxiliary rows must not create lyric lines");
+        // These roles must be direct <p> children, after the timed main spans,
+        // per src/ui/lyrics/ttml.mjs readVoice/inline (also tests/lyrics_ui.cjs).
+        for (row, start, translation, roman) in [
+            (rows[0], "1.000", "今晚", "oneul bam"),
+            (
+                rows[2],
+                "3.000",
+                "光 &amp; &lt;你&gt;",
+                "bit &amp; &lt;neo&gt;",
+            ),
+            (rows[3], "4.500", "一起", "hamkke"),
+        ] {
+            assert!(row.starts_with(&format!("<p begin=\"{start}\"")));
+            assert!(row.ends_with(&format!(
+                "</span><span ttm:role=\"x-translation\">{translation}</span><span ttm:role=\"x-roman\">{roman}</span></p>"
+            )), "{row}");
+        }
+        assert_eq!(
+            rows[1],
+            "<p begin=\"2.000\" end=\"2.500\"><span begin=\"2.000\" end=\"2.500\">WET</span></p>"
+        );
+        assert!(rows[0].contains("<span begin=\"1.300\" end=\"1.600\">밤</span>"));
+        assert_eq!(text.matches("ttm:role=\"x-translation\"").count(), 3);
+        assert_eq!(text.matches("ttm:role=\"x-roman\"").count(), 3);
+        for unused in [
+            "> // </span>",
+            "unmatched",
+            "&amp;amp;",
+            "QrcInfos",
+            "LyricContent",
+        ] {
+            assert!(!text.contains(unused), "{unused}");
+        }
+    }
+}
+
+#[test]
+fn lyric_new_handles_each_missing_or_invalid_auxiliary_track_independently() {
+    for translation in [false, true] {
+        for roman in [false, true] {
+            let mut raw = wet_lyrics();
+            let data = raw["data"].as_object_mut().unwrap();
+            if !translation {
+                data.remove("qrctrans");
+            }
+            if !roman {
+                data.remove("qrcroma");
+            }
+            let text = &converted_lyrics(&raw)[0].text;
+            assert_eq!(text.matches("<p ").count(), 4);
+            assert_eq!(
+                text.matches("ttm:role=\"x-translation\"").count(),
+                if translation { 3 } else { 0 }
+            );
+            assert_eq!(
+                text.matches("ttm:role=\"x-roman\"").count(),
+                if roman { 3 } else { 0 }
+            );
+        }
+    }
+    for invalid in [Value::Null, json!(""), json!({}), json!("unavailable")] {
+        let mut raw = wet_lyrics();
+        for field in ["qrctrans", "qrcroma", "lrctrans"] {
+            raw["data"][field] = invalid.clone();
+        }
+        let candidates = converted_lyrics(&raw);
+        assert_eq!(candidates.len(), 2);
+        for candidate in candidates {
+            assert!(candidate.text.contains("<p "));
+            assert!(!candidate.text.contains("ttm:role="));
+        }
+    }
+    // Auxiliary tracks alone cannot manufacture a main candidate.
+    let mut raw = wet_lyrics();
+    raw["data"]["qrc"] = json!("encrypted-unavailable");
+    raw["data"]["lrc"] = Value::Null;
+    assert!(converted_lyrics(&raw).is_empty());
+}
+
+#[test]
+fn lrc_candidate_uses_lrctrans_with_offsets_and_repeated_timestamps() {
+    let candidates = converted_lyrics(&wet_lyrics());
+    let text = &candidates[1].text;
+    assert!(text.contains("itunes:timing=\"Line\""));
+    assert_eq!(text.matches("<p ").count(), 2);
+    for (start, end) in [("1.000", "3.000"), ("3.000", "11.000")] {
+        assert!(text.contains(&format!(
+            "<p begin=\"{start}\" end=\"{end}\">오늘 밤<span ttm:role=\"x-translation\">LRC 翻译</span></p>"
+        )));
+    }
+    assert!(!text.contains("x-roman"));
+    assert!(!text.contains("unmatched"));
+}
+
 fn state(enabled: bool) -> Arc<AppState> {
     let mut config = AppState::new("http://127.0.0.1:1".into()).config;
     config.qq_api = enabled.then(|| "https://example.invalid/api/web".into());
@@ -510,7 +631,7 @@ async fn configured_routes_validate_mid_and_serve_only_cached_dtos() {
         Lyrics {
             candidates: vec![Lyric {
                 source: "lrc",
-                text: lrc_ttml("[00:01]Text").unwrap(),
+                text: lrc_ttml("[00:01]Text", None).unwrap(),
             }],
         },
     );

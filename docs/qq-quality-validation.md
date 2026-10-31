@@ -61,6 +61,25 @@ DAEAC3 通过同源 `/qq/song/:mid/download?quality=DAEAC3` 读取字节，`qq-j
 
 `/qq-song/:mid` 展示全部音质和中英标签、格式、大小及可用性。默认播放档位由下述「在线播放默认音质」决定；详情页切换当前歌曲档位保留剩余队列与播放进度，重复播放及源切换恢复保持所选档位，向未激活的 QQ 队列添加歌曲不打断 Apple。歌词仍按 AMLL → TTML → QRC → LRC 降级，保留翻译与来源。
 
+## T5：QRC 翻译与罗马音（2026-10-31）
+
+`GET /lyric/new?platform=qq&id=<mid>` 的一次响应同时用于生成 QRC / LRC 候选。QRC 使用 `qrc` 主歌词、`qrctrans` 翻译（LRC）及 `qrcroma` 罗马音（逐字 QRC / `LyricContent` XML）；LRC 使用 `lrc` 主歌词及 `lrctrans` 翻译。字段兼容字符串与 `{ lyric: "…" }`，响应兼容顶层字段与 `data` 包装。
+
+翻译复用主 LRC 的时间解析：支持 `[offset:…]`、一行多个时间戳，统一为整数毫秒，再与主行的起始时间精确匹配。罗马音按 QRC 的行起始时间匹配，将该行逐字文本依原顺序拼接并保留原有空格，合并为行级文本；不按字时间匹配。辅助轨乱序、缺行不会使后续行错位；空文本、`//` 占位及没有对应主行的文本忽略，不创建额外主行。缺失、空值或无法解析的辅助轨各自独立降级，主歌词仍照常生成。
+
+输出遵循 `src/ui/lyrics/ttml.mjs` 的 `readVoice` / `inline` 及既有 AMLL TTML 格式：在主行 `<p>` 内、主歌词逐字 `<span>` 之后写入直接子节点 `<span ttm:role="x-translation">翻译</span>` 与 `<span ttm:role="x-roman">罗马音</span>`，`ttm` 使用 `http://www.w3.org/ns/ttml#metadata` 命名空间。辅助文本统一 XML 转义，不混入主歌词或主词时间。QRC 主歌词保留 `itunes:timing="Word"` 与全部逐字时间；LRC 保持行级时间。
+
+详情页与 AMLL 面板继续共用 `/qq/song/:mid/lyrics` 的同一 `candidates`、`sources/qq.mjs` 的 `lyrics` / `selectLyrics` 及 `parseTTML`，候选优先级仍为 AMLL → TTML → QRC → LRC。未新增单独的翻译 / 罗马音请求或另一套候选。
+
+后端样本 `tests/fixtures/qq_lyric_new_wet.json` 根据任务已确认的 WET（`001ATFiY3pb3y6`）字段形状构造，使用精简的合成韩语 / 中文 / 罗马音文本及时间；不声称是线上原始响应或重新实网核验。回归断言覆盖内联角色与直接子节点结构、主行数量及逐字时间、毫秒精确匹配、乱序、offset、重复时间戳、XML 实体、占位和缺失 / 无效辅助轨，以及 `lrctrans` 与 `qrctrans` 各自配对。
+
+T5 离线验证：
+
+- `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**70 项通过，0 失败，仅跳过指定 3 项 wrapper 测试**。
+- `node --test --test-isolation=none tests/alac_check.mjs tests/joc_wasm.mjs tests/agent_duet.mjs tests/qq_source.mjs tests/qq_ui.mjs tests/qq_joc_input.mjs tests/player_artwork.cjs tests/player_quality.mjs tests/playback_quality.mjs`：**79 项通过，0 失败**，涵盖 CI 的 QQ、歌词对唱、ALAC 及 JOC 子集。
+- `cargo clippy --offline -p am-hook --all-targets -- -D warnings`、修改文件的 Rust 格式检查与 `git diff --check`：通过。
+- `node scripts/build-static.mjs target/t5-static --cloudflare`：211 个资源生成成功；Rust 的 `assets::tests::build_static_matches` 通过。额外执行 `tests/serverless.mjs` 时，11 项通过，静态构建项因沙箱中 Node `spawnSync /usr/bin/node EPERM` 失败（单独执行 `execFileSync(node, ['--version'])` 同样复现），不计入上述 79 项通过结果。
+
 ## 在线播放默认音质（T3，2026-10-31）
 
 设置中心新增「在线播放默认音质 / Default streaming quality」，QQ 与 Apple Music 共用一个值。沿用 `prefs.mjs` 的 `am-hook:settings` localStorage 记录，存于 `playback.quality`；取值为 `hires / lossless / dolby / high / standard`，默认 `hires`。旧记录缺少该分组或值无效时恢复 Hi-Res，修改与其他标签页的 storage 事件沿用现有同步机制。

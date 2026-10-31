@@ -13,6 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     num::NonZeroUsize,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -1141,14 +1142,24 @@ fn field_text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     v.as_str()
         .or_else(|| v.get("lyric").and_then(Value::as_str))
 }
-fn lrc_ttml(text: &str) -> Option<String> {
+struct LyricWord {
+    start: u64,
+    end: u64,
+    text: String,
+}
+struct LyricLine {
+    start: u64,
+    end: u64,
+    text: String,
+    words: Vec<LyricWord>,
+}
+fn lrc_lines(text: &str) -> Vec<LyricLine> {
     let stamp = Regex::new(r"\[(\d+):(\d+(?:\.\d+)?)\]").unwrap();
     let offset = Regex::new(r"\[offset:([+-]?\d+)\]")
         .unwrap()
         .captures(text)
         .and_then(|c| c[1].parse::<f64>().ok())
-        .unwrap_or(0.0)
-        / 1000.0;
+        .unwrap_or(0.0);
     let mut lines = Vec::new();
     for line in text.lines() {
         let content = stamp.replace_all(line, "");
@@ -1157,27 +1168,37 @@ fn lrc_ttml(text: &str) -> Option<String> {
             continue;
         }
         for c in stamp.captures_iter(line) {
-            let start =
-                (c[1].parse::<f64>().ok()? * 60.0 + c[2].parse::<f64>().ok()? + offset).max(0.0);
-            lines.push((start, xml(&content)));
+            let (Ok(minutes), Ok(seconds)) = (c[1].parse::<f64>(), c[2].parse::<f64>()) else {
+                continue;
+            };
+            let start = ((minutes * 60.0 + seconds) * 1000.0 + offset)
+                .round()
+                .max(0.0) as u64;
+            lines.push(LyricLine {
+                start,
+                end: start.saturating_add(8000),
+                text: content.clone(),
+                words: Vec::new(),
+            });
         }
     }
-    lines.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut out = String::from("<body><div>");
-    for (i, (start, text)) in lines.iter().enumerate() {
-        let end = lines.get(i + 1).map(|l| l.0).unwrap_or(start + 8.0);
-        out.push_str(&format!(
-            "<p begin=\"{start:.3}\" end=\"{end:.3}\">{text}</p>"
-        ));
+    lines.sort_by_key(|line| line.start);
+    for i in 1..lines.len() {
+        lines[i - 1].end = lines[i].start;
     }
-    out.push_str("</div></body>");
-    (!lines.is_empty()).then(|| wrap(&out, false))
+    lines
 }
-fn qrc_ttml(text: &str) -> Option<String> {
+fn qrc_lines(text: &str) -> Vec<LyricLine> {
     // /lyric/new may omit QRC. Accept decrypted [start,duration]word(offset,duration)
     // and QQ's XML LyricContent envelope; encrypted/compressed QRC falls through.
-    let text = text
+    let envelope = Regex::new(r#"\bLyricContent\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap();
+    let content = envelope.captures(text);
+    let text = content
+        .as_ref()
+        .and_then(|c| c.get(1).or_else(|| c.get(2)))
+        .map_or(text, |m| m.as_str())
         .replace("&#10;", "\n")
+        .replace("&#13;", "\r")
         .replace("&apos;", "'")
         .replace("&quot;", "\"")
         .replace("&lt;", "<")
@@ -1185,34 +1206,126 @@ fn qrc_ttml(text: &str) -> Option<String> {
         .replace("&amp;", "&");
     let line = Regex::new(r"(?m)\[(\d+),(\d+)\]([^\r\n]*)").unwrap();
     let word = Regex::new(r"([^()]+)\((\d+),(\d+)\)").unwrap();
-    let mut out = String::from("<body><div>");
-    let mut count = 0;
+    let mut lines = Vec::new();
     for c in line.captures_iter(&text) {
-        let start = c[1].parse::<u64>().ok()?;
-        let end = start.saturating_add(c[2].parse::<u64>().ok()?);
-        let mut words = String::new();
+        let (Ok(start), Ok(duration)) = (c[1].parse::<u64>(), c[2].parse::<u64>()) else {
+            continue;
+        };
+        let mut words = Vec::new();
         for w in word.captures_iter(&c[3]) {
-            let begin = w[2].parse::<u64>().ok()?;
-            let finish = begin.saturating_add(w[3].parse::<u64>().ok()?);
-            words.push_str(&format!(
-                "<span begin=\"{:.3}\" end=\"{:.3}\">{}</span>",
-                begin as f64 / 1000.0,
-                finish as f64 / 1000.0,
-                xml(&clean_text(&w[1]))
-            ));
+            let (Ok(begin), Ok(duration)) = (w[2].parse::<u64>(), w[3].parse::<u64>()) else {
+                continue;
+            };
+            words.push(LyricWord {
+                start: begin,
+                end: begin.saturating_add(duration),
+                text: clean_text(&w[1]),
+            });
         }
         if words.is_empty() {
             continue;
         }
-        count += 1;
+        lines.push(LyricLine {
+            start,
+            end: start.saturating_add(duration),
+            text: words.iter().map(|word| word.text.as_str()).collect(),
+            words,
+        });
+    }
+    lines
+}
+fn auxiliary_lines(lines: Vec<LyricLine>) -> BTreeMap<u64, String> {
+    lines
+        .into_iter()
+        .filter(|line| !matches!(line.text.trim(), "" | "//"))
+        .map(|line| (line.start, line.text))
+        .collect()
+}
+fn render_lyrics(
+    lines: Vec<LyricLine>,
+    word: bool,
+    translations: Vec<LyricLine>,
+    pronunciations: Vec<LyricLine>,
+) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    let translations = auxiliary_lines(translations);
+    let pronunciations = auxiliary_lines(pronunciations);
+    let mut out = String::from("<body><div>");
+    for line in lines {
         out.push_str(&format!(
-            "<p begin=\"{:.3}\" end=\"{:.3}\">{words}</p>",
-            start as f64 / 1000.0,
-            end as f64 / 1000.0
+            "<p begin=\"{:.3}\" end=\"{:.3}\">",
+            line.start as f64 / 1000.0,
+            line.end as f64 / 1000.0
         ));
+        if line.words.is_empty() {
+            out.push_str(&xml(&line.text));
+        } else {
+            for word in line.words {
+                out.push_str(&format!(
+                    "<span begin=\"{:.3}\" end=\"{:.3}\">{}</span>",
+                    word.start as f64 / 1000.0,
+                    word.end as f64 / 1000.0,
+                    xml(&word.text)
+                ));
+            }
+        }
+        // Direct children of <p>, as parseTTML/readVoice and AMLL TTML expect.
+        // Match millisecond line starts; missing/placeholder rows never shift later rows.
+        for (role, entries) in [
+            ("x-translation", &translations),
+            ("x-roman", &pronunciations),
+        ] {
+            if let Some(text) = entries.get(&line.start) {
+                out.push_str(&format!("<span ttm:role=\"{role}\">{}</span>", xml(text)));
+            }
+        }
+        out.push_str("</p>");
     }
     out.push_str("</div></body>");
-    (count > 0).then(|| wrap(&out, true))
+    Some(wrap(&out, word))
+}
+fn lrc_ttml(text: &str, translation: Option<&str>) -> Option<String> {
+    render_lyrics(
+        lrc_lines(text),
+        false,
+        translation.map(lrc_lines).unwrap_or_default(),
+        Vec::new(),
+    )
+}
+fn qrc_ttml(text: &str, translation: Option<&str>, pronunciation: Option<&str>) -> Option<String> {
+    render_lyrics(
+        qrc_lines(text),
+        true,
+        translation.map(lrc_lines).unwrap_or_default(),
+        pronunciation.map(qrc_lines).unwrap_or_default(),
+    )
+}
+fn converted_lyrics(raw: &Value) -> Vec<Lyric> {
+    let raw = raw.get("data").unwrap_or(raw);
+    let mut candidates = Vec::new();
+    if let Some(text) = field_text(raw, "qrc").and_then(|text| {
+        qrc_ttml(
+            text,
+            field_text(raw, "qrctrans"),
+            field_text(raw, "qrcroma"),
+        )
+    }) {
+        candidates.push(Lyric {
+            source: "qrc",
+            text,
+        });
+    }
+    if let Some(text) =
+        field_text(raw, "lrc").and_then(|text| lrc_ttml(text, field_text(raw, "lrctrans")))
+    {
+        candidates.push(Lyric {
+            source: "lrc",
+            text,
+        });
+    }
+    candidates
 }
 async fn lyrics(
     State(state): State<Arc<AppState>>,
@@ -1276,19 +1389,7 @@ async fn lyrics(
         )
         .await
     {
-        let raw = raw.get("data").unwrap_or(&raw);
-        if let Some(text) = field_text(raw, "qrc").and_then(qrc_ttml) {
-            candidates.push(Lyric {
-                source: "qrc",
-                text,
-            });
-        }
-        if let Some(text) = field_text(raw, "lrc").and_then(lrc_ttml) {
-            candidates.push(Lyric {
-                source: "lrc",
-                text,
-            });
-        }
+        candidates.extend(converted_lyrics(&raw));
     }
     let data = Lyrics { candidates };
     if !data.candidates.is_empty() {
