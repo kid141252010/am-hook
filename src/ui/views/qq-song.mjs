@@ -16,7 +16,8 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
   let track = null;
   let rows = qq.qualityRows(null, mid);
   let qualityState = 'loading';
-  let lyric = { song: null };
+  let lyric = { song: null, rawQrc: false, rawTrans: false, rawRoma: false };
+  let lyricsExpanded = false;
   let errorKey = '';
   const el = (tag, props, ...children) => {
     const node = Object.assign(document.createElement(tag), props);
@@ -103,10 +104,51 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
     syncPlaying();
   }
 
+  function ensureLyricsControls() {
+    const section = $('lyrics');
+    let actions = $('lyrics-actions');
+    if (!actions) {
+      actions = el('div', { className: 'qq-lyrics-actions', id: 'lyrics-actions' });
+      section.append(actions);
+    }
+    const controls = [
+      ['lyrics-preview', 'button', 'qq.lyricsPreview'],
+      ['lyrics-qrc', 'a', 'qq.downloadQrc'],
+      ['lyrics-trans', 'a', 'qq.downloadQrcTrans'],
+      ['lyrics-roma', 'a', 'qq.downloadQrcRoma'],
+    ];
+    for (const [id, tag, key] of controls) {
+      if ($(id)) continue;
+      const node = el(tag, { className: tag === 'a' ? 'song-reparse qq-lyrics-download' : 'song-reparse', id,
+        type: tag === 'button' ? 'button' : undefined, textContent: t(key) });
+      if (tag === 'a') node.hidden = true;
+      actions.append(node);
+    }
+    const preview = $('lyrics-preview');
+    if (!preview.dataset.bound) {
+      preview.dataset.bound = 'true';
+      preview.addEventListener('click', () => { lyricsExpanded = !lyricsExpanded; renderLyrics(); });
+    }
+    return { preview, qrc: $('lyrics-qrc'), trans: $('lyrics-trans'), roma: $('lyrics-roma') };
+  }
+
   function renderLyrics() {
+    const controls = ensureLyricsControls();
     const lines = qq.lyricLines(lyric);
-    $('lyrics').hidden = !lines.length;
+    const hasRaw = lyric.rawQrc || lyric.rawTrans || lyric.rawRoma;
+    $('lyrics').hidden = !(lines.length || hasRaw);
+    controls.preview.hidden = !lines.length;
+    controls.preview.textContent = t(lyricsExpanded ? 'qq.lyricsCollapse' : 'qq.lyricsPreview');
+    controls.preview.setAttribute('aria-expanded', String(lyricsExpanded));
+    controls.qrc.hidden = !lyric.rawQrc;
+    controls.qrc.href = lyric.rawQrc ? qq.rawLyricsUrl(mid, 'qrc') : '';
+    controls.trans.hidden = !lyric.rawTrans;
+    controls.trans.href = lyric.rawTrans ? qq.rawLyricsUrl(mid, 'qrctrans') : '';
+    controls.roma.hidden = !lyric.rawRoma;
+    controls.roma.href = lyric.rawRoma ? qq.rawLyricsUrl(mid, 'qrcroma') : '';
     $('lyrics-source').textContent = lyric.source ? t('qq.lyricsSource', { source: lyric.source.toUpperCase() }) : '';
+    $('lyrics-source').hidden = !lyricsExpanded;
+    $('lyrics-lines').hidden = !lyricsExpanded;
     $('lyrics-lines').replaceChildren(...lines.map((line) => el('p', { className: 'qq-lyric-line' },
       el('span', { textContent: line.text }),
       ...(line.translation ? [el('span', { className: 'qq-lyric-translation', textContent: line.translation })] : []))));

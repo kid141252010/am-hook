@@ -39,6 +39,11 @@ const qualityQuery = (quality) => quality === undefined ? '' : `?quality=${quali
 export const songPath = (id) => `/qq-song/${mid(id)}`;
 export const playUrl = (id, quality) => `/qq/song/${mid(id)}/play${qualityQuery(quality)}`;
 export const downloadUrl = (id, quality) => `/qq/song/${mid(id)}/download${qualityQuery(quality)}`;
+const RAW_LYRIC_KINDS = ['qrc', 'qrctrans', 'qrcroma'];
+export function rawLyricsUrl(id, kind) {
+  if (!RAW_LYRIC_KINDS.includes(kind)) throw new Error('Invalid QQ raw lyric kind');
+  return `/qq/song/${mid(id)}/lyrics/raw?kind=${kind}`;
+}
 export const coverUrl = (albumMid) => `/qq/cover/${mid(albumMid)}`;
 /** photo_new only serves discrete sizes. Resolve before Apple-sized consumers see it. */
 export function artworkUrl(artwork) {
@@ -141,7 +146,8 @@ export function selectLyrics(candidates, parse) {
 }
 export async function lyrics(id, parse, signal) {
   const data = await request(`/qq/song/${mid(id)}/lyrics`, signal);
-  return selectLyrics(data.candidates, parse);
+  return { ...selectLyrics(data.candidates, parse),
+    rawQrc: data.rawQrc === true, rawTrans: data.rawTrans === true, rawRoma: data.rawRoma === true };
 }
 export function download(track, quality) {
   const link = document.createElement('a');

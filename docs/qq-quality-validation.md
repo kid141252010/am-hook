@@ -236,3 +236,9 @@ QQ `/lyric/new` 的 QRC 与 LRC 候选在 `render_lyrics` 前过滤主行，移�
 单行规则包括：版权正则 `未经许可.*(不得|禁止)`、含计划及酷狗/音乐人/QQ音乐的推广行、`by:` 署名行、带缓存艺人名且以冒号结尾的 Ut、器乐团队/说唱作曲/戏曲/引用前缀 Kt、首个非空行的 Ht 标题头、零起止时间且所有词时长为零的占位行。整条候选若所有主行都匹配“纯音乐，请（您）欣赏”，按无歌词处理。制作行被删后，翻译和发音仍由现有时间对齐逻辑处理，因此不会为已删主行挂载辅助 span。
 
 标题/艺人上下文优先取适配器已有的 `songs` LRU；冷缓存时复用 `qq.song()` / `info_data` 的既有 info 通路，并沿用 `infos` LRU 与 mid 键 map 解析。歌词请求拿到 `Song.name` 与 `Song.artists` 后再同时过滤 QRC / LRC，info 获取失败则降级为无上下文，其他规则仍执行。
+
+## T10：QQ 详情页歌词预览与原文下载（2026-10-31）
+
+详情页 `/qq-song/:mid` 的歌词区默认折叠，只渲染预览/收起、QRC、QRC 翻译和 QRC 注音这一组可换行按钮；歌词行在点击预览后显示，再次点击收起。Apple 歌曲页的歌词和 TTML 下载逻辑没有改动。中英文文案位于 `src/ui/i18n.js`。
+
+`GET /qq/song/:mid/lyrics` 的 DTO 增加 `rawQrc`、`rawTrans`、`rawRoma` 三个布尔值。三个原文字段和转换候选保存在同一歌词缓存条目中，前端仅为对应字段为真时渲染下载链接。`GET /qq/song/:mid/lyrics/raw?kind=qrc|qrctrans|qrcroma` 从同一缓存取 `/lyric/new` 原文，分别以 `{歌手} - {歌名}.qrc`、`{歌手} - {歌名} (翻译).lrc`、`{歌手} - {歌名} (注音).qrc` 附件返回；非法 `kind` 返回 400，缺少该原文字段返回 404，文件名同时提供 RFC 5987 的 UTF-8 `filename*`。

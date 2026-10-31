@@ -828,8 +828,20 @@ struct Lyric {
     text: String,
 }
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Lyrics {
     candidates: Vec<Lyric>,
+    raw_qrc: bool,
+    raw_trans: bool,
+    raw_roma: bool,
+    #[serde(skip_serializing)]
+    raw: RawLyrics,
+}
+#[derive(Clone, Default)]
+struct RawLyrics {
+    qrc: Option<String>,
+    trans: Option<String>,
+    roma: Option<String>,
 }
 #[derive(Deserialize)]
 pub struct SearchQuery {
@@ -849,6 +861,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/qq/song/:mid/play", get(play))
         .route("/qq/song/:mid/download", get(download))
         .route("/qq/song/:mid/lyrics", get(lyrics))
+        .route("/qq/song/:mid/lyrics/raw", get(raw_lyrics))
         .route("/qq/song/:mid/qualities", get(qualities))
         .route("/qq/capabilities", get(capabilities))
 }
@@ -998,6 +1011,39 @@ fn download_content_type(url: &reqwest::Url) -> &'static str {
         "dtsx" => "audio/vnd.dts.hd",
         _ => "application/octet-stream",
     }
+}
+#[derive(Default, Deserialize)]
+struct RawLyricsQuery {
+    kind: Option<String>,
+}
+fn raw_lyrics_kind(kind: Option<&str>) -> ApiResult<&'static str> {
+    match kind {
+        Some("qrc") => Ok("qrc"),
+        Some("qrctrans") => Ok("qrctrans"),
+        Some("qrcroma") => Ok("qrcroma"),
+        _ => Err(bad()),
+    }
+}
+fn lyrics_filename(song: &Song, kind: &str) -> String {
+    let suffix = match kind {
+        "qrc" => ".qrc",
+        "qrctrans" => " (翻译).lrc",
+        "qrcroma" => " (注音).qrc",
+        _ => unreachable!("validated raw lyric kind"),
+    };
+    let base = format!("{} - {}", song.artists.join(", "), song.name);
+    let base: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !"/\\:*?\"<>|".contains(*c))
+        .take(160)
+        .collect();
+    format!("{base}{suffix}")
+}
+fn lyrics_disposition(song: &Song, kind: &str) -> String {
+    let name = lyrics_filename(song, kind);
+    let ext = name.rsplit('.').next().unwrap_or("txt");
+    let encoded: String = name.bytes().map(|b| format!("%{b:02X}")).collect();
+    format!("attachment; filename=\"download.{ext}\"; filename*=UTF-8''{encoded}")
 }
 async fn download(
     State(state): State<Arc<AppState>>,
@@ -1568,16 +1614,9 @@ fn converted_lyrics_with_context(raw: &Value, context: Option<LyricContext<'_>>)
     }
     candidates
 }
-async fn lyrics(
-    State(state): State<Arc<AppState>>,
-    Path(mid): Path<String>,
-) -> ApiResult<Json<Lyrics>> {
-    let qq = adapter(&state)?;
-    check_mid(&mid)?;
-    if let Some(data) = qq.lyrics.get(&mid) {
-        return Ok(Json(data));
-    }
+async fn fetch_lyrics(qq: &Qq, mid: &str) -> ApiResult<Lyrics> {
     let mut candidates = Vec::new();
+    let mut raw_lyrics = RawLyrics::default();
     // Match the existing AMLL native API using QQ's identifier, never Apple ID.
     let amll = qq
         .api
@@ -1608,7 +1647,7 @@ async fn lyrics(
     if let Ok(raw) = qq
         .request(
             "/lyric/ttml",
-            &[("platform", "qq".into()), ("mid", mid.clone())],
+            &[("platform", "qq".into()), ("mid", mid.to_owned())],
         )
         .await
     {
@@ -1626,7 +1665,7 @@ async fn lyrics(
     if let Ok(raw) = qq
         .request(
             "/lyric/new",
-            &[("platform", "qq".into()), ("id", mid.clone())],
+            &[("platform", "qq".into()), ("id", mid.to_owned())],
         )
         .await
     {
@@ -1634,21 +1673,80 @@ async fn lyrics(
         // song cache. Reuse the normal song/info path on a cold cache so the
         // metadata-aware filters see the same title and artists. A failed info
         // request only drops the context; the lyric candidates remain usable.
-        let song = match qq.songs.get(&mid) {
+        let song = match qq.songs.get(mid) {
             Some(song) => Some(song),
-            None => qq.song(&mid).await.ok(),
+            None => qq.song(mid).await.ok(),
         };
         let context = song.as_ref().map(|song| LyricContext {
             name: &song.name,
             artists: &song.artists,
         });
-        candidates.extend(converted_lyrics_with_context(&raw, context));
+        let raw = raw.get("data").unwrap_or(&raw);
+        raw_lyrics.qrc = field_text(raw, "qrc")
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned);
+        raw_lyrics.trans = field_text(raw, "qrctrans")
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned);
+        raw_lyrics.roma = field_text(raw, "qrcroma")
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned);
+        candidates.extend(converted_lyrics_with_context(raw, context));
     }
-    let data = Lyrics { candidates };
-    if !data.candidates.is_empty() {
+    Ok(Lyrics {
+        candidates,
+        raw_qrc: raw_lyrics.qrc.is_some(),
+        raw_trans: raw_lyrics.trans.is_some(),
+        raw_roma: raw_lyrics.roma.is_some(),
+        raw: raw_lyrics,
+    })
+}
+async fn lyrics(
+    State(state): State<Arc<AppState>>,
+    Path(mid): Path<String>,
+) -> ApiResult<Json<Lyrics>> {
+    let qq = adapter(&state)?;
+    check_mid(&mid)?;
+    if let Some(data) = qq.lyrics.get(&mid) {
+        return Ok(Json(data));
+    }
+    let data = fetch_lyrics(qq, &mid).await?;
+    if !data.candidates.is_empty() || data.raw_qrc || data.raw_trans || data.raw_roma {
         qq.lyrics.put(mid, data.clone());
     }
     Ok(Json(data))
+}
+async fn raw_lyrics(
+    State(state): State<Arc<AppState>>,
+    Path(mid): Path<String>,
+    Query(query): Query<RawLyricsQuery>,
+) -> ApiResult<Response> {
+    let qq = adapter(&state)?;
+    check_mid(&mid)?;
+    let kind = raw_lyrics_kind(query.kind.as_deref())?;
+    let data = if let Some(data) = qq.lyrics.get(&mid) {
+        data
+    } else {
+        let data = fetch_lyrics(qq, &mid).await?;
+        if !data.candidates.is_empty() || data.raw_qrc || data.raw_trans || data.raw_roma {
+            qq.lyrics.put(mid.clone(), data.clone());
+        }
+        data
+    };
+    let text = match kind {
+        "qrc" => data.raw.qrc,
+        "qrctrans" => data.raw.trans,
+        "qrcroma" => data.raw.roma,
+        _ => unreachable!("validated raw lyric kind"),
+    }
+    .ok_or_else(missing)?;
+    let song = qq.song(&mid).await?;
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CONTENT_DISPOSITION, lyrics_disposition(&song, kind))
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(text))
+        .unwrap())
 }
 
 #[cfg(test)]

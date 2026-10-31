@@ -1025,6 +1025,10 @@ async fn configured_routes_validate_mid_and_serve_only_cached_dtos() {
                 source: "lrc",
                 text: lrc_ttml("[00:01]Text", None).unwrap(),
             }],
+            raw_qrc: false,
+            raw_trans: false,
+            raw_roma: false,
+            raw: RawLyrics::default(),
         },
     );
     for path in [
@@ -1041,6 +1045,65 @@ async fn configured_routes_validate_mid_and_serve_only_cached_dtos() {
         assert!(!body.contains("example.invalid"), "{path}");
         assert!(!body.contains("file_url"), "{path}");
     }
+}
+
+#[tokio::test]
+async fn raw_lyric_route_validates_kind_reports_missing_data_and_uses_utf8_filenames() {
+    let state = state(true);
+    let qq = state.qq.as_ref().unwrap();
+    let song = qq.song_dto(&raw_song()).unwrap();
+    let mid = song.id.clone();
+    qq.songs.put(mid.clone(), song);
+    qq.lyrics.put(
+        mid.clone(),
+        Lyrics {
+            candidates: Vec::new(),
+            raw_qrc: true,
+            raw_trans: true,
+            raw_roma: false,
+            raw: RawLyrics {
+                qrc: Some("<LyricContent>qrc raw</LyricContent>".into()),
+                trans: Some("[00:01.00]translation raw".into()),
+                roma: None,
+            },
+        },
+    );
+    let response = get(state.clone(), &format!("/qq/song/{mid}/lyrics/raw?kind=qrc")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+    assert_eq!(
+        response.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"download.qrc\"; filename*=UTF-8''%E5%91%A8%E6%9D%B0%E4%BC%A6%20%2D%20%E6%99%B4%E5%A4%A9%2E%71%72%63"
+    );
+    assert_eq!(
+        String::from_utf8(to_bytes(response.into_body(), 100_000).await.unwrap().to_vec()).unwrap(),
+        "<LyricContent>qrc raw</LyricContent>"
+    );
+    let response = get(state.clone(), &format!("/qq/song/{mid}/lyrics/raw?kind=qrctrans")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .contains("%28%E7%BF%BB%E8%AF%91%29%2E%6C%72%63"));
+    assert_eq!(
+        String::from_utf8(to_bytes(response.into_body(), 100_000).await.unwrap().to_vec()).unwrap(),
+        "[00:01.00]translation raw"
+    );
+    for query in ["", "?kind=bad", "?kind=qrc%2F"] {
+        assert_eq!(
+            get(state.clone(), &format!("/qq/song/{mid}/lyrics/raw{query}"))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        get(state, &format!("/qq/song/{mid}/lyrics/raw?kind=qrcroma"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
