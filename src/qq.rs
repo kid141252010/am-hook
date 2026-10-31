@@ -1912,24 +1912,6 @@ fn render_lyrics(
     out.push_str("</div></body>");
     Some(wrap(&out, word))
 }
-#[cfg(test)]
-fn lrc_ttml(text: &str, translation: Option<&str>) -> Option<String> {
-    render_lyrics(
-        lrc_lines(text),
-        false,
-        translation.map(lrc_lines).unwrap_or_default(),
-        Vec::new(),
-    )
-}
-#[cfg(test)]
-fn qrc_ttml(text: &str, translation: Option<&str>, pronunciation: Option<&str>) -> Option<String> {
-    render_lyrics(
-        qrc_lines(text),
-        true,
-        translation.map(lrc_lines).unwrap_or_default(),
-        pronunciation.map(qrc_lines).unwrap_or_default(),
-    )
-}
 fn lrc_ttml_filtered(
     text: &str,
     translation: Option<&str>,
@@ -1962,10 +1944,6 @@ fn qrc_ttml_filtered(
         translation.map(lrc_lines).unwrap_or_default(),
         pronunciation.map(qrc_lines).unwrap_or_default(),
     )
-}
-#[cfg(test)]
-fn converted_lyrics(raw: &Value) -> Vec<Lyric> {
-    converted_lyrics_with_context(raw, None)
 }
 fn converted_lyrics_with_context(raw: &Value, context: Option<LyricContext<'_>>) -> Vec<Lyric> {
     let raw = raw.get("data").unwrap_or(raw);

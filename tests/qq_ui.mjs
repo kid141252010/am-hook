@@ -25,7 +25,8 @@ function detailPage(t, { qualities = defaultQualities, failQualities = false, na
     }
   });
   const root = ids('favorite', 'title', 'subtitle', 'meta', 'badges', 'art', 'radiosity', 'enqueue', 'play-best',
-    'variant-list', 'quality-status', 'lyrics', 'lyrics-source', 'lyrics-lines', 'alert');
+    'variant-list', 'quality-status', 'lyrics', 'lyrics-source', 'lyrics-actions', 'lyrics-preview',
+    'lyrics-qrc', 'lyrics-trans', 'lyrics-roma', 'lyrics-lines', 'alert');
   const data = new Map();
   const local = { getItem: (key) => data.get(key) ?? null, setItem: (key, value) => data.set(key, value) };
   const played = [], queued = [];
@@ -63,6 +64,7 @@ test('QQ detail omits unavailable tiers while retaining runtime-playable and dow
 
 test('QQ detail header, radiosity, playback, favorites and queue use the fixed cover URL', async (t) => {
   const { root, local, played, queued } = detailPage(t);
+  assert.equal(root.querySelector('#lyrics-preview').getAttribute('aria-controls'), 'lyrics-lines');
   await new Promise(setImmediate);
   assert.equal(root.querySelector('#art').querySelector('img').src, fixedCover);
   assert.equal(root.querySelector('#radiosity').querySelector('img').src, fixedCover);

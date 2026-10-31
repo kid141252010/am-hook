@@ -68,13 +68,35 @@ test('QQ opener accepts the DAEAC3 download route, forwards cancellation and rej
     assert.equal(calls.at(-1).options.credentials, 'same-origin');
     assert.equal(calls.at(-1).options.redirect, 'error');
     const count = calls.length;
-    for (const url of ['https://qq.com/file.mp4', '//qq.com/file.mp4', '/qq/song/WET/play?quality=DA', '/qq/song/WET/download?quality=da', '/qq/song/WET/download?quality=DA&url=https://qq.com']) {
+    for (const url of ['https://qq.com/file.mp4', '//qq.com/file.mp4', '/qq/song/WET/play?quality=DA', '/qq/song/WET/download?quality=HQ', '/qq/song/WET/download?quality=da', '/qq/song/WET/download?quality=DA&url=https://qq.com']) {
       await assert.rejects(openQqJocTrack(url), /local QQ download/);
     }
     assert.equal(calls.length, count);
     controller.abort();
     await assert.rejects(openQqJocTrack('/qq/song/WET/download?quality=DAEAC3', controller.signal), { name: 'AbortError' });
     assert.equal(calls.length, count);
+  } finally { globalThis.fetch = original; }
+});
+
+test('QQ JOC opener reports streamed byte progress with and without Content-Length', async () => {
+  const original = globalThis.fetch;
+  const progress = [];
+  const source = new Uint8Array(mp4());
+  const chunks = [source.slice(0, 13), source.slice(13)];
+  const response = (withLength) => ({ ok: true,
+    headers: withLength ? { get: (name) => name === 'content-length' ? String(chunks[0].length + chunks[1].length) : null } : undefined,
+    body: { getReader() { let index = 0; return { async read() { return index < chunks.length ? { done: false, value: chunks[index++] } : { done: true }; } }; } },
+  });
+  try {
+    globalThis.fetch = async () => response(true);
+    const withLengthProgress = [];
+    await openQqJocTrack('/qq/song/WET/download?quality=DAEAC3', undefined, (value) => withLengthProgress.push(value));
+    assert.equal(withLengthProgress.at(-1).downloaded, chunks[0].length + chunks[1].length);
+    assert.equal(withLengthProgress.at(-1).percent, 100);
+    globalThis.fetch = async () => response(false);
+    await openQqJocTrack('/qq/song/WET/download?quality=DAEAC3', undefined, (value) => progress.push(value));
+    assert.equal(progress.at(-1).downloaded, chunks[0].length + chunks[1].length);
+    assert.equal(progress.at(-1).percent, null);
   } finally { globalThis.fetch = original; }
 });
 
@@ -185,8 +207,7 @@ test('QQ PCM entry rejects download and native classifications before opening in
 });
 
 test('QQ quality switching enters JocLiveEngine through QQ input and resumes native playback without losing the queue', async () => {
-  const original = { AudioContext: globalThis.AudioContext, Worker: globalThis.Worker, fetch: globalThis.fetch,
-    quality: qq.currentQuality };
+  const original = { AudioContext: globalThis.AudioContext, Worker: globalThis.Worker, fetch: globalThis.fetch };
   const methods = Object.fromEntries(['openDecoder', 'pump', 'seek'].map((name) =>
     [name, Object.getOwnPropertyDescriptor(JocLiveEngine.prototype, name)]));
   globalThis.AudioContext = function AudioContext() { return contextStub(); };
@@ -207,7 +228,6 @@ test('QQ quality switching enters JocLiveEngine through QQ input and resumes nat
   for (const name of ['show', 'showError', 'setLoading', 'renderTrackText', 'renderArtwork', 'renderMode',
     'emit', 'updateMediaSession', 'renderProgress', 'prepareNext', 'extendQueue', 'emitSpatial', 'updatePcm']) player[name] = () => {};
   try {
-    qq.setCurrentQuality('HQ');
     await player.playQueue([qq.entryOf(qq.toTrack({ id: 'WET' })), qq.entryOf(qq.toTrack({ id: 'next' }))]);
     const queue = player.queue;
     player.audio.currentTime = 0.25;
@@ -221,7 +241,6 @@ test('QQ quality switching enters JocLiveEngine through QQ input and resumes nat
     assert.equal(player.queue, queue);
     assert.equal(queue.pos, 0);
     assert.equal(queue.entries[0].quality, 'DAEAC3');
-    assert.equal(qq.currentQuality, 'DAEAC3');
     engine.decoder.broken = true; // Do not retain the idle Worker timer in this test.
     await player.switchVariant(qq.qualityVariant('SQ', { format: 'FLAC' }));
     assert.equal(engine.controller.signal.aborted, true);
@@ -232,7 +251,6 @@ test('QQ quality switching enters JocLiveEngine through QQ input and resumes nat
     assert.equal(player.audio.paused, false);
     assert.equal(player.queue, queue);
     assert.equal(queue.entries[1].track, 'next');
-    assert.equal(qq.currentQuality, 'SQ');
   } finally {
     if (player.pcm) { if (player.pcm.decoder) player.pcm.decoder.broken = true; player.pcm.destroy(); }
     for (const [name, descriptor] of Object.entries(methods)) {
@@ -240,6 +258,5 @@ test('QQ quality switching enters JocLiveEngine through QQ input and resumes nat
       else delete JocLiveEngine.prototype[name];
     }
     globalThis.AudioContext = original.AudioContext; globalThis.Worker = original.Worker; globalThis.fetch = original.fetch;
-    qq.setCurrentQuality(original.quality);
   }
 });

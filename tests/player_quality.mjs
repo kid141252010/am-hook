@@ -3,12 +3,11 @@ import test, { beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import * as qq from '../src/ui/sources/qq.mjs';
-const { AmPlayer, qualityBadge, useJocSettings } = createRequire(import.meta.url)('../src/ui/player.js');
+const { AmPlayer, qualityBadge, variantLabel, useJocSettings } = createRequire(import.meta.url)('../src/ui/player.js');
 
-const original = Object.fromEntries(['fetch', 'AmWrapper', 'AmDecrypt', 'MediaSource', 'Worker', 'AudioContext', 'window', 'document']
+const original = Object.fromEntries(['fetch', 'AmWrapper', 'AmDecrypt', 'MediaSource', 'Worker', 'AudioContext', 'window', 'document', 'AmI18n']
   .map((key) => [key, globalThis[key]]));
 beforeEach(() => {
-  qq.setCurrentQuality('HQ');
   qq.clearMimeSupportCache();
   globalThis.AmWrapper = { songMaster() { assert.fail('QQ must not request an Apple master'); } };
   globalThis.AmDecrypt = undefined;
@@ -17,7 +16,7 @@ beforeEach(() => {
   globalThis.MediaSource = { isTypeSupported: () => true };
   globalThis.fetch = async () => assert.fail('variants must be fetched lazily');
 });
-afterEach(() => { Object.assign(globalThis, original); qq.clearMimeSupportCache(); qq.setCurrentQuality('HQ'); useJocSettings(null); });
+afterEach(() => { Object.assign(globalThis, original); qq.clearMimeSupportCache(); useJocSettings(null); });
 
 // Only DOM primitives used by the production quality panel; all rendering and events are real.
 class Element {
@@ -83,21 +82,24 @@ test('QQ variants retain available native/JOC formats and actual payload metadat
   assert.deepEqual(qq.qualityVariants([{ quality: 'HQ', available: true, playback: 'download' }]), []);
 });
 
-test('QQ entries default to the shared HQ selection and allow settings initialization without fetching variants', async () => {
+test('QQ player labels reuse localized quality names and fall back to the code', () => {
+  globalThis.AmI18n = { t: (key) => key === 'qq.quality.SQ.label' ? 'Localized lossless' : key };
+  assert.equal(variantLabel({ source: 'qq', quality: 'SQ' }), 'QQ · Localized lossless');
+  assert.equal(variantLabel({ source: 'qq', quality: 'DAEAC3' }), 'QQ · DAEAC3');
+});
+
+test('QQ entries and quality helpers use HQ when no quality is supplied', async () => {
   const player = playerHarness();
   await player.playQueue([qq.entryOf(track())]);
   assert.equal(player.current.quality, 'HQ');
   assert.equal(player.current.variant.quality, 'HQ');
   assert.equal(player.current.variants, undefined);
   assert.equal(player.audio.src, '/qq/song/song/play?quality=HQ');
-  qq.setCurrentQuality('SQ');
-  assert.equal(qq.qualityItem(track()).quality, 'SQ');
-  assert.equal(qq.qualityEntry(track()).quality, 'SQ');
+  assert.equal(qq.qualityItem(track()).quality, 'HQ');
+  assert.equal(qq.qualityEntry(track()).quality, 'HQ');
   await player.playQueue([qq.entryOf(track('next'))]);
-  assert.equal(player.current.quality, 'SQ');
-  assert.equal(player.audio.src, '/qq/song/next/play?quality=SQ');
-  assert.throws(() => qq.setCurrentQuality('sq'), /Invalid QQ quality/);
-  assert.equal(qq.currentQuality, 'SQ');
+  assert.equal(player.current.quality, 'HQ');
+  assert.equal(player.audio.src, '/qq/song/next/play?quality=HQ');
 });
 
 test('QQ badge opens the shared panel, fetches once and marks the current quality with its format', async () => {
@@ -167,14 +169,13 @@ test('panel selection resumes native QQ at the same time and retains queue order
   assert.equal(player.current.id, 'qq:song:SQ');
   assert.equal(player.audio.src, '/qq/song/song/play?quality=SQ');
   assert.equal(player.audio.currentTime, 68.5);
-  assert.equal(qq.currentQuality, 'SQ');
   assert.equal(queue.entries[0].quality, 'SQ');
   assert.equal(player.$('.player-mode').textContent, 'QQ · SQ');
   assert.equal(player.qualityPanel.all('quality-option')[1].getAttribute('aria-current'), 'true');
   await player.switchVariant(player.current.variant);
   assert.equal(player.audio.paused, false); // Selecting the checked row must not toggle playback.
   await player.playAt(1);
-  assert.equal(player.current.quality, 'SQ');
+  assert.equal(player.current.quality, 'HQ');
   await player.playAt(0);
   assert.equal(player.current.quality, 'SQ');
   assert.equal(player.current.variant.format, 'FLAC 16-bit / 44.1 kHz');
@@ -190,7 +191,6 @@ test('switching a QQ variant uses its API codec override and rejects unsupported
   const current = player.current;
   await player.switchVariant(qq.qualityVariant('NAC'));
   assert.equal(player.current, current);
-  assert.equal(qq.currentQuality, 'Q360V1');
 });
 
 test('QQ and Apple lazy caches stay separate for the same ID, and a late QQ result cannot replace Apple panel data', async () => {
@@ -251,5 +251,4 @@ test('Apple inline variants keep their badge, panel and MSE switching behavior w
   assert.equal(player.audio.currentTime, 32.5);
   assert.equal(player.queue, queue);
   assert.equal(player.current.variants, appleVariants);
-  assert.equal(qq.currentQuality, 'HQ');
 });

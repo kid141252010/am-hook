@@ -5,18 +5,57 @@ export { trackKey } from './track.mjs';
 const MID = /^[0-9A-Za-z]{1,32}$/;
 export const enabled = () => globalThis.window?.AM_HOOK_HOST?.qqEnabled === true;
 const mid = (id) => { if (!['string', 'number'].includes(typeof id) || !MID.test(String(id))) throw new Error('Invalid QQ ID'); return String(id); };
-export const QUALITY_IDS = ['MP3128', 'AAC48', 'WEB', 'AAC192', 'OGG96', 'OGG192', 'HQ', 'NAC',
-  'SQ', 'RS', 'QAI', 'Q360V1', 'Q360V2', 'RA360', 'DTS', 'DTSX', 'DA', 'DAEAC3', 'DA448', 'DA1500'];
-const DEFAULT_CODECS = {
-  MP3128: 'mp3', AAC48: 'aac', WEB: 'aac', AAC192: 'aac', OGG96: 'vorbis', OGG192: 'vorbis', HQ: 'mp3', NAC: 'nac',
-  SQ: 'flac', RS: 'flac', QAI: 'flac', Q360V1: 'flac', Q360V2: 'flac', RA360: 'unknown', DTS: 'dts', DTSX: 'dtsx',
-  DA: 'ac-4', DAEAC3: 'ec-3', DA448: 'ac-4', DA1500: 'ac-4',
-};
-const CONTENT_TYPES = {
-  mp3: 'audio/mpeg', aac: 'audio/mp4; codecs="mp4a.40.2"', flac: 'audio/flac', vorbis: 'audio/ogg; codecs="vorbis"',
-  opus: 'audio/ogg; codecs="opus"', pcm: 'audio/wav', 'ec-3': 'audio/mp4; codecs="ec-3"',
-  'ac-4': 'audio/mp4; codecs="ac-4"',
-};
+const FALLBACK_CAPABILITIES = [
+  ['MP3128', 'mp3', 'audio/mpeg', 'native', 'size_128mp3'],
+  ['AAC48', 'aac', 'audio/mp4; codecs="mp4a.40.2"', 'native', 'size_48aac'],
+  ['WEB', 'aac', 'audio/mp4; codecs="mp4a.40.2"', 'native', 'size_96aac'],
+  ['AAC192', 'aac', 'audio/mp4; codecs="mp4a.40.2"', 'native', 'size_192aac'],
+  ['OGG96', 'vorbis', 'audio/ogg; codecs="vorbis"', 'native', 'size_96ogg'],
+  ['OGG192', 'vorbis', 'audio/ogg; codecs="vorbis"', 'native', 'size_192ogg'],
+  ['HQ', 'mp3', 'audio/mpeg', 'native', 'size_320mp3'],
+  ['NAC', 'nac', 'audio/x-nac', 'download', null],
+  ['SQ', 'flac', 'audio/flac', 'native', 'size_flac'],
+  ['RS', 'flac', 'audio/flac', 'native', 'size_hires'],
+  ['QAI', 'flac', 'audio/flac', 'native', null],
+  ['Q360V1', 'flac', 'audio/flac', 'native', null],
+  ['Q360V2', 'flac', 'audio/flac', 'native', null],
+  ['RA360', 'unknown', 'application/octet-stream', 'download', 'size_360ra'],
+  ['DTS', 'dts', 'audio/vnd.dts', 'download', 'size_dts'],
+  ['DTSX', 'dtsx', 'audio/vnd.dts.hd; codecs="dtsx"', 'download', null],
+  ['DA', 'ac-4', 'audio/mp4; codecs="ac-4"', 'ac-4-probe', 'size_dolby'],
+  ['DAEAC3', 'ec-3', 'audio/mp4; codecs="ec-3"', 'joc', 'size_dolby'],
+  ['DA448', 'ac-4', 'audio/mp4; codecs="ac-4"', 'ac-4-probe', null],
+  ['DA1500', 'ac-4', 'audio/mp4; codecs="ac-4"', 'ac-4-probe', null],
+].map(([quality, defaultCodec, contentType, playbackClass, sizeField]) =>
+  ({ quality, defaultCodec, contentType, playbackClass, sizeField }));
+export const QUALITY_IDS = FALLBACK_CAPABILITIES.map(({ quality }) => quality);
+const FALLBACK_BY_QUALITY = new Map(FALLBACK_CAPABILITIES.map((entry) => [entry.quality, entry]));
+let capabilityTable = FALLBACK_BY_QUALITY;
+
+function validCapabilities(data) {
+  if (!data?.enabled || !Array.isArray(data.qualities)) return null;
+  const entries = data.qualities.map((entry) => {
+    if (!entry || typeof entry.quality !== 'string' || !FALLBACK_BY_QUALITY.has(entry.quality)
+      || typeof entry.defaultCodec !== 'string' || typeof entry.contentType !== 'string'
+      || !['native', 'joc', 'download', 'ac-4-probe'].includes(entry.playbackClass)
+      || (entry.sizeField !== null && typeof entry.sizeField !== 'string')) return null;
+    return { quality: entry.quality, defaultCodec: entry.defaultCodec, contentType: entry.contentType,
+      playbackClass: entry.playbackClass, sizeField: entry.sizeField };
+  });
+  if (entries.some((entry) => !entry) || new Set(entries.map((entry) => entry.quality)).size !== QUALITY_IDS.length
+    || entries.length !== QUALITY_IDS.length) return null;
+  return new Map(entries.map((entry) => [entry.quality, entry]));
+}
+
+/** Capabilities are static metadata; a failed or incomplete request keeps the bundled table. */
+export const capabilitiesReady = (typeof globalThis.window !== 'undefined' && typeof fetch === 'function'
+  ? fetch('/qq/capabilities', { cache: 'force-cache' })
+    .then((response) => response.ok ? response.json() : null)
+    .then((data) => { const table = validCapabilities(data); if (table) capabilityTable = table; return table; })
+    .catch(() => null)
+  : Promise.resolve(null));
+
+export function capabilities() { return [...capabilityTable.values()].map((entry) => ({ ...entry })); }
 
 // Cache by MIME and the runtime objects used for the probe. The object identity
 // check keeps test/SSR environments from retaining a result after a fake browser
@@ -24,25 +63,27 @@ const CONTENT_TYPES = {
 const mimeSupport = new Map();
 function mimeEnvironment(environment) {
   const win = environment?.window;
-  const mediaSource = environment?.MediaSource ?? win?.MediaSource;
+  const mediaSource = environment?.ManagedMediaSource ?? win?.ManagedMediaSource
+    ?? environment?.MediaSource ?? win?.MediaSource;
   const document = environment?.document ?? win?.document;
-  return { win, mediaSource, document };
+  return { win, mediaSource, document, audio: environment?.audio };
 }
 
 /** Runtime browser capability probe shared by QQ playback classification/tests. */
 export function supportsMime(mime, environment = globalThis) {
   const context = mimeEnvironment(environment);
   const cached = mimeSupport.get(mime);
-  if (cached && cached.win === context.win && cached.mediaSource === context.mediaSource && cached.document === context.document) {
+  if (cached && cached.win === context.win && cached.mediaSource === context.mediaSource
+    && cached.document === context.document && cached.audio === context.audio) {
     return cached.supported;
   }
   let supported = false;
-  if (context.win && context.document) {
+  if (context.win || context.document || context.mediaSource || context.audio) {
     try {
       supported = typeof context.mediaSource?.isTypeSupported === 'function'
         && context.mediaSource.isTypeSupported(mime) === true;
       if (!supported) {
-        const audio = context.document.createElement?.('audio');
+        const audio = context.audio || context.document.createElement?.('audio');
         supported = typeof audio?.canPlayType === 'function' && audio.canPlayType(mime) !== '';
       }
     } catch { supported = false; }
@@ -53,29 +94,31 @@ export function supportsMime(mime, environment = globalThis) {
 
 export function clearMimeSupportCache() { mimeSupport.clear(); }
 
+// player.js is a classic script and cannot import this ESM module synchronously.
+// Register the same probe so QQ mode detection has one implementation in both paths.
+globalThis.AmHookQq = { ...(globalThis.AmHookQq || {}), supportsMime };
+if (globalThis.AmHook && typeof globalThis.AmHook === 'object') globalThis.AmHook.supportsMime = supportsMime;
+
 /** WET stsd: DA/DA448/DA1500 = ac-4/dac4; DAEAC3 = ec-3/dec3 (2026-10-31).
  * QQ's fixed Dolby pipelines determine those codecs, including for saved queues.
  * EC-3 remains on the JOC pipeline; baseline codecs are native, while
  * AC-4 (support varies with browser licensing) is probed at runtime. */
 export function playbackInfo(quality = 'HQ', row = {}, environment = globalThis) {
   qualityId(quality);
+  const capability = capabilityTable.get(quality) || FALLBACK_BY_QUALITY.get(quality);
   const dolby = ['DA', 'DA448', 'DA1500', 'DAEAC3'].includes(quality);
-  const codec = !dolby && typeof row.codec === 'string' ? row.codec : DEFAULT_CODECS[quality];
-  const contentType = !dolby && typeof row.contentType === 'string' ? row.contentType
-    : CONTENT_TYPES[codec] || 'application/octet-stream';
-  const playback = ['NAC', 'DTS', 'DTSX', 'RA360'].includes(quality) ? 'download'
-    : codec === 'ec-3' ? 'joc'
-      : !Object.hasOwn(CONTENT_TYPES, codec) ? 'download'
-        : codec === 'ac-4' && !supportsMime(contentType, environment) ? 'download' : 'native';
+  const codec = !dolby && typeof row.codec === 'string' ? row.codec : capability.defaultCodec;
+  const contentType = !dolby && typeof row.contentType === 'string' ? row.contentType : capability.contentType;
+  const playback = codec === 'ec-3' ? 'joc'
+    : codec === 'ac-4' ? (supportsMime(contentType, environment) ? 'native' : 'download')
+      : capability.playbackClass === 'download' ? 'download'
+        : capability.playbackClass === 'joc' ? 'joc' : capability.playbackClass === 'native' ? 'native' : 'download';
   return { playback, codec, codecs: codec, contentType };
 }
 export function qualityId(value = 'HQ') {
   if (!QUALITY_IDS.includes(value)) throw new Error('Invalid QQ quality');
   return value;
 }
-/** Shared selection for playback and new entries. Settings may initialize it through setCurrentQuality. */
-export let currentQuality = 'HQ';
-export function setCurrentQuality(quality) { currentQuality = qualityId(quality); }
 const qualityQuery = (quality) => quality === undefined ? '' : `?quality=${qualityId(quality)}`;
 export const songPath = (id) => `/qq-song/${mid(id)}`;
 export const playUrl = (id, quality) => `/qq/song/${mid(id)}/play${qualityQuery(quality)}`;
@@ -110,7 +153,7 @@ export function entryOf(track) {
   return withIdentity({ ...track, track: track.id, artwork: albumMid ? artworkUrl(track.artwork, albumMid) : '',
     artworkFetchUrl: albumMid ? coverUrl(albumMid) : '' });
 }
-export function qualityEntry(track, quality = currentQuality, row) {
+export function qualityEntry(track, quality = 'HQ', row) {
   return { ...entryOf(track), quality: qualityId(quality), ...playbackInfo(quality, row) };
 }
 export function qualityVariant(quality, row = {}) {
@@ -123,7 +166,7 @@ export function variantItem(id, variant) {
   return { id: `qq:${mid(id)}:${quality}`, quality, ...playbackInfo(quality, variant), variant,
     streamUrl: playUrl(id, quality), downloadUrl: downloadUrl(id, quality), label: `QQ · ${quality}` };
 }
-export function qualityItem(track, quality = currentQuality, row) {
+export function qualityItem(track, quality = 'HQ', row) {
   return { ...qualityEntry(track, quality, row), ...variantItem(track.id, qualityVariant(quality, row)), title: track.name };
 }
 export function qualityVariants(rows) {
@@ -202,11 +245,21 @@ export function download(track, quality) {
 }
 const FAVORITES = 'am-hook:qq-favorites';
 const listeners = new Set();
+let favoriteCache = null;
+let favoriteCacheStorage = null;
+function invalidateFavoriteCache() {
+  favoriteCache = null;
+  favoriteCacheStorage = null;
+}
 export function favorites(storage) {
   try {
-    storage ||= globalThis.localStorage;
-    const records = JSON.parse(storage.getItem(FAVORITES) || '[]');
-    if (!Array.isArray(records)) return [];
+    const injected = storage !== undefined;
+    const target = injected ? storage : globalThis.localStorage;
+    const records = JSON.parse(target?.getItem(FAVORITES) || '[]');
+    if (!Array.isArray(records)) {
+      if (!injected) { favoriteCacheStorage = target; favoriteCache = new Set(); }
+      return [];
+    }
     const unique = new Map();
     for (const raw of records) {
       if (raw?.source !== 'qq' || !MID.test(String(raw.id))) continue;
@@ -216,20 +269,37 @@ export function favorites(storage) {
         durationMs: raw.duration, vip: raw.qq?.vip, ttml: raw.qq?.ttml });
       unique.set(track.key, track);
     }
-    return [...unique.values()];
-  } catch { return []; }
+    const tracks = [...unique.values()];
+    if (!injected) {
+      favoriteCacheStorage = target;
+      favoriteCache = new Set(tracks.map((track) => track.key));
+    }
+    return tracks;
+  } catch { if (storage === undefined) invalidateFavoriteCache(); return []; }
 }
-export const isFavorite = (track) => favorites().some((t) => t.key === trackKey(track));
-export function toggleFavorite(track, storage = globalThis.localStorage) {
+export const isFavorite = (track) => {
+  const storage = globalThis.localStorage;
+  if (!favoriteCache || favoriteCacheStorage !== storage) favorites();
+  return favoriteCache?.has(trackKey(track)) === true;
+};
+export function toggleFavorite(track, storage) {
+  const target = storage === undefined ? globalThis.localStorage : storage;
   const records = favorites(storage);
   const key = trackKey(track);
   const found = records.findIndex((t) => t.key === key);
   if (found >= 0) records.splice(found, 1); else records.unshift(withIdentity(track));
   // Read once more through the allowlist before writing; storage failures reach the UI.
   const clean = favorites({ getItem: () => JSON.stringify(records) });
-  storage.setItem(FAVORITES, JSON.stringify(clean));
+  target.setItem(FAVORITES, JSON.stringify(clean));
+  invalidateFavoriteCache();
+  if (storage === undefined) favorites();
   for (const fn of listeners) fn();
   return found < 0;
 }
 export function onFavoritesChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
-globalThis.addEventListener?.('storage', (e) => { if (e.key === FAVORITES || e.key === null) for (const fn of listeners) fn(); });
+globalThis.addEventListener?.('storage', (e) => {
+  if (e.key !== FAVORITES && e.key !== null) return;
+  invalidateFavoriteCache();
+  favorites();
+  for (const fn of listeners) fn();
+});

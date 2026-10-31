@@ -1,6 +1,6 @@
 # QQ 音质与 capabilities 规格
 
-本文是 QQ 音质接口的当前契约。档位、编码和播放分类由 Rust `Quality` / `Codec` 定义生成，前端不维护另一份 capabilities 表。
+本文是 QQ 音质接口的当前契约。档位、编码和播放分类由 Rust `Quality` / `Codec` 定义生成；前端启动时消费本接口的静态档位表。
 
 ## `GET /qq/capabilities`
 
@@ -51,6 +51,8 @@ AC-4 的三个档位使用中性的 `playbackClass: "ac-4-probe"`。浏览器能
 
 ## Quality and playback endpoints
 
+浏览器加载 QQ source 模块时请求一次 `/qq/capabilities`。响应必须包含完整的 20 项以及 `defaultCodec`、`contentType`、`playbackClass`、`sizeField`；缺失、格式不完整或请求失败时使用前端内置的同形状回退表。`playbackInfo` 以这张表为基础，再叠加运行时能力：E-AC-3 始终进入 JOC 管线，AC-4 通过共享的 `supportsMime`（包含 `ManagedMediaSource`）探测，其他档位使用静态的 native/download 分类。完整 qualities 行仍可提供实际 URL 的 allowlist 编码和 MIME 覆盖；详情页继续使用完整 qualities，队列默认选择使用 `basic=1`。
+
 `/qq/song/:mid/qualities?basic=1` uses the cached `/extra/music/info` `file` object and never probes unknown tiers. The full endpoint may query `/extra/music/url` for tiers without a verified size mapping; probes use a separate semaphore and short negative cache. `/play` returns a 302 for any available URL. Native rows use `/play`; DAEAC3 JOC uses `/download?quality=DAEAC3` and the existing browser JOC pipeline; download-only rows remain download actions.
 
 ## Lyrics and cache
@@ -63,6 +65,10 @@ The cache keeps raw QRC fields and converted candidates together. A normal succe
 
 Quality is an enum and unknown query values are rejected before an upstream request. Song DTOs expose no upstream private fields or audio URLs. Playback `Location` and download redirects accept only HTTPS QQ CDN hosts without ports or credentials; the download stream forwards only safe media headers. TTML is rebuilt with an allowlist, rejects DOCTYPE/ENTITY and oversized input, and QRC accepts plaintext or `LyricContent` wrappers without any decryption step.
 
+## F22 首页来源与播放来源
+
+已复现 `/?source=qq` 搜索后播放 Apple 歌曲再后退回首页的旧路径：`applySource` 调用 `player.switchSource('qq')` 会进入 `teardown` 并暂停 Apple。现状已把首页来源限定为搜索 UI 状态；播放来源只由 `play` / `playQueue` 改变，因此后退只刷新搜索，不会拆掉正在播放的 Apple 条目。回归断言在 `tests/qq_source.mjs`。
+
 ## Validation
 
-The Rust unit suite checks the generated JSON, every quality mapping, QRC/LRC conversion, TTML allowlisting, cache states and URL restrictions. `tests/qq_upstream.rs` adds local axum upstream integration coverage; the browser consumes capabilities in a later batch and is intentionally unchanged here.
+The Rust unit suite checks the generated JSON, every quality mapping, QRC/LRC conversion, TTML allowlisting, cache states and URL restrictions. `tests/qq_upstream.rs` adds local axum upstream integration coverage. Browser tests cover capabilities fallback/consumption, shared MIME detection, favorites caching, fixed HQ fallback, source navigation, and JOC download progress.

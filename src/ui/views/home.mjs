@@ -29,7 +29,8 @@ export function mount({ root, signal, player, navigate, onLangChange, toast, loa
     input.dataset.i18nAttr = source === 'qq' ? 'placeholder=qq.placeholder' : 'placeholder=home.placeholder';
     input.placeholder = t(source === 'qq' ? 'qq.placeholder' : 'home.placeholder');
     try { localStorage.setItem('am-hook:source', source); } catch {}
-    player.switchSource(source);
+    // This is the search source only. Playback source changes only through play/playQueue,
+    // so returning to the home page cannot tear down a song from another source.
   }
   $('source-select').addEventListener('change', () => {
     source = $('source-select').value === 'qq' ? 'qq' : 'apple';

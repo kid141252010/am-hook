@@ -2,7 +2,7 @@
 // Worker. This module only reads containers; decoding and rendering stay there.
 const RATE = 48000;
 const MAX_SAMPLES = 1_000_000;
-const DOWNLOAD = /^\/qq\/song\/[0-9A-Za-z]{1,32}\/download\?quality=(MP3128|AAC48|WEB|AAC192|OGG96|OGG192|HQ|NAC|SQ|RS|QAI|Q360V1|Q360V2|RA360|DTS|DTSX|DA|DAEAC3|DA448|DA1500)$/;
+const DOWNLOAD = /^\/qq\/song\/[0-9A-Za-z]{1,32}\/download\?quality=DAEAC3$/;
 const fail = (message) => { throw new Error(`QQ JOC: ${message}`); };
 const aborted = (signal) => { if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError'); };
 
@@ -195,12 +195,37 @@ export function qqJocTrack(input) {
 }
 
 /** Only the backend may follow QQ's CDN URL or choose the regional egress. */
-export async function openQqJocTrack(url, signal) {
+export async function openQqJocTrack(url, signal, onProgress) {
   if (typeof url !== 'string' || !DOWNLOAD.test(url)) fail('expected local QQ download URL');
   aborted(signal);
   const response = await fetch(url, { signal, credentials: 'same-origin', redirect: 'error' });
   if (!response.ok) fail(`download HTTP ${response.status}`);
-  const bytes = await response.arrayBuffer();
+  const lengthHeader = response.headers?.get?.('content-length') ?? response.headers?.['content-length'];
+  const total = Number.isSafeInteger(Number(lengthHeader)) && Number(lengthHeader) > 0 ? Number(lengthHeader) : null;
+  const report = (downloaded) => onProgress?.({ downloaded, total, percent: total ? Math.min(100, Math.floor(downloaded * 100 / total)) : null });
+  let bytes;
+  if (response.body?.getReader) {
+    const stream = response.body.getReader();
+    const chunks = [];
+    let downloaded = 0;
+    for (;;) {
+      aborted(signal);
+      const part = await stream.read();
+      if (part.done) break;
+      if (part.value?.length) {
+        chunks.push(part.value);
+        downloaded += part.value.length;
+        report(downloaded);
+      }
+    }
+    bytes = new Uint8Array(downloaded);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  } else {
+    const buffer = await response.arrayBuffer();
+    bytes = new Uint8Array(buffer);
+    report(bytes.length);
+  }
   aborted(signal);
   return qqJocTrack(bytes);
 }

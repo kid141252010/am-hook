@@ -1,6 +1,7 @@
 // Offline QQ contract / fallback / queue regression tests: node --test tests/qq_source.mjs
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import * as qq from '../src/ui/sources/qq.mjs';
 import { sourceOf, trackKey, withIdentity } from '../src/ui/sources/track.mjs';
@@ -9,7 +10,6 @@ const { AmPlayer, trackKey: playerKey, detectQqModes, useJocSettings, usePlaybac
 const browserGlobals = Object.fromEntries(['window', 'document', 'MediaSource']
   .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
 beforeEach(() => {
-  qq.setCurrentQuality('HQ');
   qq.clearMimeSupportCache();
   globalThis.window = {};
   globalThis.document = { createElement: () => ({ canPlayType: () => 'probably' }) };
@@ -116,6 +116,34 @@ test('QQ quality rows list all tiers, retain formats and sizes, and omit unavail
   }
 });
 
+test('QQ consumes the complete capabilities table at module startup and keeps fallback on malformed data', async () => {
+  const saved = { window: Object.getOwnPropertyDescriptor(globalThis, 'window'), fetch: Object.getOwnPropertyDescriptor(globalThis, 'fetch') };
+  const base = qq.capabilities();
+  const custom = base.map((entry) => entry.quality === 'HQ'
+    ? { ...entry, defaultCodec: 'vorbis', contentType: 'audio/ogg; codecs="vorbis"' } : entry);
+  let requested = 0;
+  Object.defineProperty(globalThis, 'window', { value: {}, configurable: true });
+  Object.defineProperty(globalThis, 'fetch', { value: async (path) => {
+    assert.equal(path, '/qq/capabilities'); requested++;
+    return { ok: true, json: async () => ({ enabled: true, qualities: custom }) };
+  }, configurable: true });
+  try {
+    const loaded = await import(`../src/ui/sources/qq.mjs?capabilities-${Date.now()}`);
+    await loaded.capabilitiesReady;
+    assert.equal(requested, 1);
+    assert.equal(loaded.playbackInfo('HQ').codec, 'vorbis');
+    assert.equal(loaded.playbackInfo('HQ').contentType, 'audio/ogg; codecs="vorbis"');
+    assert.equal(loaded.capabilities().length, 20);
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ enabled: true, qualities: [] }) });
+    const malformed = await import(`../src/ui/sources/qq.mjs?capabilities-malformed-${Date.now()}`);
+    await malformed.capabilitiesReady;
+    assert.equal(malformed.playbackInfo('HQ').codec, 'mp3');
+  } finally {
+    if (saved.window) Object.defineProperty(globalThis, 'window', saved.window); else delete globalThis.window;
+    if (saved.fetch) Object.defineProperty(globalThis, 'fetch', saved.fetch); else delete globalThis.fetch;
+  }
+});
+
 test('detail lyric lines use the best parsed source and retain translations as text', () => {
   const result = qq.selectLyrics([candidate('ttml', 'bad'), candidate('lrc', 'valid')], (text) => {
     if (text === 'bad') throw new Error('bad XML');
@@ -175,6 +203,42 @@ test('QQ favorites persist independently, deduplicate keys and discard upstream 
   local.setItem('am-hook:qq-favorites', '{broken');
   assert.deepEqual(qq.favorites(local), []);
   assert.deepEqual(qq.favorites({ getItem() { throw new Error('storage blocked'); } }), []);
+});
+
+test('QQ favorite checks use a default-storage key cache and injected storage bypasses it', () => {
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const data = new Map();
+  let reads = 0;
+  const local = {
+    getItem(key) { reads++; return data.get(key) ?? null; },
+    setItem(key, value) { data.set(key, value); },
+  };
+  const track = qq.toTrack(dto);
+  Object.defineProperty(globalThis, 'localStorage', { value: local, configurable: true });
+  try {
+    data.set('am-hook:qq-favorites', JSON.stringify([track]));
+    assert.equal(qq.isFavorite(track), true);
+    const firstRead = reads;
+    assert.equal(qq.isFavorite(track), true);
+    assert.equal(reads, firstRead, 'repeated row checks should hit the key Set');
+    qq.favorites(local);
+    assert.ok(reads > firstRead, 'an explicitly injected storage is parsed independently');
+    qq.toggleFavorite(track);
+    assert.equal(qq.isFavorite(track), false, 'toggle invalidates the default-storage cache');
+  } finally {
+    if (saved) Object.defineProperty(globalThis, 'localStorage', saved); else delete globalThis.localStorage;
+  }
+});
+
+test('home search source changes do not switch or tear down the playing source', () => {
+  const home = fs.readFileSync(new URL('../src/ui/views/home.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(home, /player\.switchSource\(source\)/);
+  const player = playerHarness();
+  player.current = { source: 'apple', track: '123' };
+  let tornDown = 0;
+  player.teardown = () => { tornDown++; };
+  player.switchSource('qq');
+  assert.equal(tornDown, 1, 'the old switchSource path tears down playback; home must not call it');
 });
 
 test('QQ covers resolve for rows, legacy favorites and player entries; Apple templates retain their shape', () => {
@@ -536,6 +600,24 @@ test('AC-4 playbackInfo follows injected browser capability and is download-only
     document: { createElement: () => ({ canPlayType: () => '' }) } };
   assert.equal(qq.playbackInfo('DA', {}, unsupported).playback, 'download');
   assert.equal(qq.playbackInfo('DA', {}, {}).playback, 'download');
+});
+
+test('shared QQ MIME detection prefers ManagedMediaSource with the same player probe', () => {
+  let managedCalls = 0;
+  const previous = { managed: globalThis.ManagedMediaSource, media: globalThis.MediaSource };
+  const environment = { window: {}, ManagedMediaSource: { isTypeSupported: () => { managedCalls++; return true; } },
+    MediaSource: { isTypeSupported: () => false }, document: { createElement: () => ({ canPlayType: () => '' }) } };
+  try {
+    assert.equal(qq.playbackInfo('DA', {}, environment).playback, 'native');
+    assert.equal(managedCalls, 1);
+    globalThis.ManagedMediaSource = environment.ManagedMediaSource;
+    globalThis.MediaSource = environment.MediaSource;
+    qq.clearMimeSupportCache();
+    assert.deepEqual(detectQqModes(qq.playbackInfo('DA'), { canPlayType: () => '' }), ['native']);
+  } finally {
+    if (previous.managed) globalThis.ManagedMediaSource = previous.managed; else delete globalThis.ManagedMediaSource;
+    globalThis.MediaSource = previous.media;
+  }
 });
 
 test('QQ rows keep downloads when codecs or browser capabilities prevent playback', () => {

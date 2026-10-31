@@ -104,10 +104,11 @@
       return jocSettings().mode === 'binaural' ? ['jocbin', 'joc2'] : ['joc2'];
     }
     const mime = item.contentType || 'audio/mpeg';
-    const MS = global.ManagedMediaSource || global.MediaSource;
-    if (MS && typeof MS.isTypeSupported === 'function' && MS.isTypeSupported(mime)) return ['native'];
-    audio ||= global.document?.createElement('audio');
-    return typeof audio?.canPlayType === 'function' && audio.canPlayType(mime) !== '' ? ['native'] : [];
+    const supportsMime = globalThis.AmHookQq?.supportsMime || globalThis.AmHook?.supportsMime;
+    if (typeof supportsMime !== 'function') return [];
+    const environment = audio ? { window: globalThis.window, ManagedMediaSource: globalThis.ManagedMediaSource,
+      MediaSource: globalThis.MediaSource, document: globalThis.document, audio } : globalThis;
+    return supportsMime(mime, environment) ? ['native'] : [];
   }
 
   const loadQq = () => typeof module !== 'undefined' && module.exports
@@ -150,7 +151,11 @@
   }
 
   function variantLabel(v) {
-    if (v.source === 'qq') return `QQ · ${v.quality}`;
+    if (v.source === 'qq') {
+      const key = `qq.quality.${v.quality}.label`;
+      const localized = t(key);
+      return `QQ · ${localized && localized !== key ? localized : v.quality}`;
+    }
     const g = v.group_id.toLowerCase();
     if (g.includes('alac')) {
       const spec = [v.bit_depth && `${v.bit_depth}-bit`, v.sample_rate && `${(v.sample_rate / 1000).toFixed(1).replace(/\.0$/, '')} kHz`].filter(Boolean).join(' / ');
@@ -377,13 +382,13 @@
         // the info-backed rows only. This keeps queue startup free of URL
         // probes; the full qualities request remains for the detail panel.
         let rows;
-        try { rows = await qq.qualities(entry.track, undefined, { basic: true }); } catch { /* use currentQuality on lookup failure */ }
+        try { rows = await qq.qualities(entry.track, undefined, { basic: true }); } catch { /* use the stable HQ fallback */ }
         if (rows) {
           row = qq.pickDefaultQuality(rows, preference);
           if (!row) throw Object.assign(new Error(t('album.noPlayable', { name: entry.name })), { noPlayable: true });
           quality = row.quality;
         } else {
-          quality = qq.currentQuality;
+          quality = 'HQ';
         }
       }
       return { ...entry, ...qq.variantItem(entry.track, qq.qualityVariant(quality, row)), source: 'qq', key: trackKey(entry),
@@ -1893,7 +1898,12 @@
     /** 播放方式：MSE · ALAC（浏览器直接解码）、ALAC → FLAC（转码）、E-AC-3 → 5.1 PCM（解码为多声道 PCM）、E-AC-3 → JOC（对象渲染） */
     modeText() {
       const c = this.current;
-      if (c.source === 'qq') return c.label || `QQ · ${c.quality || 'HQ'}`;
+      if (c.source === 'qq') {
+        const quality = c.quality || 'HQ';
+        const key = `qq.quality.${quality}.label`;
+        const localized = t(key);
+        return `QQ · ${localized && localized !== key ? localized : quality}`;
+      }
       if (c.mode === 'joc2') return `E-AC-3 → ${t('player.jocSpeaker')}`;
       if (c.mode === 'jocbin') return `E-AC-3 → ${t('player.jocBinaural', { dataset: this.pcm ? this.pcm.dataset : jocSettings().dataset })}`;
       if (c.mode === 'flac') return 'ALAC → FLAC';
@@ -2979,7 +2989,6 @@
       if (item.source === 'qq') {
         const qq = await loadQq();
         if (token !== this.playToken) return;
-        qq.setCurrentQuality(item.quality ?? qq.currentQuality);
         // Rebuild for older saved/source contexts too; <img> keeps item.artwork.
         // A song mid is never a substitute for a missing album mid.
         const albumMid = item.qq?.albumMid || '';
@@ -3014,6 +3023,7 @@
           await this.tryMode(mode, item, resumeAt, token, paused);
           this.attempting = false;
           this.setLoading(false);
+          this.showError('');
           if (paused && token === this.playToken) this.audio.pause();
           this.renderProgress();
           if (token === this.playToken) {
@@ -3093,7 +3103,13 @@
         pcm.gain.gain.value = this.audio.volume;
         const openTrack = item.source === 'qq' ? async (url, signal) => {
           const { openQqJocTrack } = await loadQqJocInput();
-          return openQqJocTrack(url, signal);
+          return openQqJocTrack(url, signal, (progress) => {
+            if (typeof this.$ !== 'function' || typeof this.renderError !== 'function') return;
+            const downloaded = progress.downloaded.toLocaleString();
+            const percent = progress.percent == null ? '—' : `${progress.percent}%`;
+            this.errorMsg = () => t('player.qqDownloading', { downloaded, percent });
+            this.renderError();
+          });
         } : undefined;
         await pcm.load(item.source === 'qq' ? item.downloadUrl : item.m3u8Url, openTrack);
         if (token !== this.playToken) return;
@@ -3284,7 +3300,8 @@
     }
   }
 
-  const api = { AmPlayer, Marquee, artistNodes, qualityBadge, qualityIcon, segmentAt, formatTime, detectMode, detectModes, detectQqModes, mimeFor, useJocSettings, usePlaybackSettings, trackKey, sourceOf };
+  const api = { AmPlayer, Marquee, artistNodes, qualityBadge, qualityIcon, segmentAt, formatTime, variantLabel,
+    detectMode, detectModes, detectQqModes, mimeFor, useJocSettings, usePlaybackSettings, trackKey, sourceOf };
   if (typeof module !== 'undefined' && module.exports) module.exports = { ...api, MseEngine, JocEngine, JocLiveEngine, sortVariants };
   else global.AmHook = api;
 })(typeof window !== 'undefined' ? window : globalThis);

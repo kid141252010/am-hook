@@ -387,16 +387,17 @@ fn ttml_keeps_timing_translation_and_agents_but_removes_credits_and_urls() {
 #[test]
 fn lrc_fallback_handles_headers_offsets_repeated_stamps_and_xml_escaping() {
     let text = "[by:https://example.invalid/private]\n[offset:100]\n[00:01.00][00:03.00]A & B\n[00:05.0]Next";
-    let cleaned = lrc_ttml(text, None).unwrap();
+    let cleaned = lrc_ttml_filtered(text, None, None).unwrap();
     assert!(!cleaned.contains("example.invalid"));
     assert!(cleaned.contains("begin=\"0.900\" end=\"2.900\">A &amp; B"));
     assert!(cleaned.contains("begin=\"2.900\" end=\"4.900\">A &amp; B"));
-    assert!(lrc_ttml("[by:someone]\nno timestamps", None).is_none());
+    assert!(lrc_ttml_filtered("[by:someone]\nno timestamps", None, None).is_none());
 }
 #[test]
 fn qrc_word_timing_and_optional_fields_fall_through_safely() {
-    let cleaned = qrc_ttml(
+    let cleaned = qrc_ttml_filtered(
         "[1000,500]你(1000,200)好(1200,300)\n[2000,1000]World(2000,1000)",
+        None,
         None,
         None,
     )
@@ -404,7 +405,7 @@ fn qrc_word_timing_and_optional_fields_fall_through_safely() {
     assert!(cleaned.contains("itunes:timing=\"Word\""));
     assert!(cleaned.contains("<p begin=\"1.000\" end=\"1.500\">"));
     assert!(cleaned.contains("<span begin=\"1.200\" end=\"1.500\">好</span>"));
-    assert!(qrc_ttml("encrypted-unavailable", None, None).is_none());
+    assert!(qrc_ttml_filtered("encrypted-unavailable", None, None, None).is_none());
     assert_eq!(
         field_text(&json!({"lrc":{"lyric":"[00:01]text"}}), "lrc"),
         Some("[00:01]text")
@@ -456,10 +457,11 @@ fn qrc_parser_drops_invalid_rows_and_keeps_parenthesized_fragments() {
 
 #[test]
 fn qrc_background_rows_attach_with_nested_roles_or_stand_alone() {
-    let rendered = qrc_ttml(
+    let rendered = qrc_ttml_filtered(
         "[0,100]main(0,100)\n[1000,1000](bg(1000,500))(1500,500)",
         Some("[00:01.000]bg translation"),
         Some("[1000,100]roman(1000,100)"),
+        None,
     )
     .unwrap();
     assert_eq!(rendered.matches("<p ").count(), 1);
@@ -467,7 +469,7 @@ fn qrc_background_rows_attach_with_nested_roles_or_stand_alone() {
         "<span ttm:role=\"x-bg\" begin=\"1.000\" end=\"2.000\"><span begin=\"1.000\" end=\"1.500\">bg</span><span begin=\"1.500\" end=\"2.000\"></span><span ttm:role=\"x-translation\">bg translation</span><span ttm:role=\"x-roman\">roman</span></span>"
     ));
 
-    let standalone = qrc_ttml("[1000,500](bg(1000,200))(1200,300)", None, None).unwrap();
+    let standalone = qrc_ttml_filtered("[1000,500](bg(1000,200))(1200,300)", None, None, None).unwrap();
     assert_eq!(standalone.matches("<p ").count(), 1);
     assert!(!standalone.contains("ttm:role=\"x-bg\""));
     assert!(standalone.contains("<p begin=\"1.000\" end=\"1.500\">"));
@@ -613,10 +615,11 @@ fn auxiliary_matching_takes_the_nearest_unused_start_within_120ms() {
 
 #[test]
 fn auxiliary_roles_each_consume_matches_once_in_main_line_order() {
-    let text = qrc_ttml(
+    let text = qrc_ttml_filtered(
         "[1090,100]first(1090,100)\n[1000,100]closer(1000,100)\n[1090,100]duplicate(1090,100)",
         Some("[00:01.001]translation & <text>"),
         Some("[1001,100]ro(1001,50)man & <text>(1051,50)"),
+        None,
     )
     .unwrap();
     let rows: Vec<_> = Regex::new(r"<p .*?</p>")
@@ -639,7 +642,7 @@ fn synthetic_wet_lyric_new_aligns_translation_and_romanization_in_amll_inline_fo
     let raw = synthetic_wet_lyrics();
     let row_pattern = Regex::new(r"<p .*?</p>").unwrap();
     for raw in [&raw, &raw["data"]] {
-        let candidates = converted_lyrics(raw);
+        let candidates = converted_lyrics_with_context(raw, None);
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].source, "qrc");
         assert_eq!(candidates[1].source, "lrc");
@@ -691,7 +694,7 @@ fn synthetic_wet_lyric_new_aligns_translation_and_romanization_in_amll_inline_fo
 fn real_wet_lyric_new_preserves_lines_and_auxiliary_spans_after_unescaped_quotes() {
     let raw: Value =
         serde_json::from_str(include_str!("../fixtures/qq_lyric_new_wet_real.json")).unwrap();
-    let candidates = converted_lyrics(&raw);
+    let candidates = converted_lyrics_with_context(&raw, None);
     assert_eq!(candidates.len(), 2);
     let text = &candidates
         .iter()
@@ -924,7 +927,7 @@ fn info_filter_applies_other_rules_and_pure_music_tracks() {
         "qrc": "[0,100]纯音乐，请欣赏(0,0)",
         "lrc": "[00:00.00]纯音乐，请欣赏",
     });
-    assert!(converted_lyrics(&raw).is_empty());
+    assert!(converted_lyrics_with_context(&raw, None).is_empty());
 }
 
 #[test]
@@ -939,7 +942,7 @@ fn lyric_new_handles_each_missing_or_invalid_auxiliary_track_independently() {
             if !roman {
                 data.remove("qrcroma");
             }
-            let text = &converted_lyrics(&raw)[0].text;
+            let text = &converted_lyrics_with_context(&raw, None)[0].text;
             assert_eq!(text.matches("<p ").count(), 4);
             assert_eq!(
                 text.matches("ttm:role=\"x-translation\"").count(),
@@ -956,7 +959,7 @@ fn lyric_new_handles_each_missing_or_invalid_auxiliary_track_independently() {
         for field in ["qrctrans", "qrcroma", "lrctrans"] {
             raw["data"][field] = invalid.clone();
         }
-        let candidates = converted_lyrics(&raw);
+        let candidates = converted_lyrics_with_context(&raw, None);
         assert_eq!(candidates.len(), 2);
         for candidate in candidates {
             assert!(candidate.text.contains("<p "));
@@ -967,12 +970,12 @@ fn lyric_new_handles_each_missing_or_invalid_auxiliary_track_independently() {
     let mut raw = synthetic_wet_lyrics();
     raw["data"]["qrc"] = json!("encrypted-unavailable");
     raw["data"]["lrc"] = Value::Null;
-    assert!(converted_lyrics(&raw).is_empty());
+    assert!(converted_lyrics_with_context(&raw, None).is_empty());
 }
 
 #[test]
 fn lrc_candidate_uses_lrctrans_with_offsets_and_repeated_timestamps() {
-    let candidates = converted_lyrics(&synthetic_wet_lyrics());
+    let candidates = converted_lyrics_with_context(&synthetic_wet_lyrics(), None);
     let text = &candidates[1].text;
     assert!(text.contains("itunes:timing=\"Line\""));
     assert_eq!(text.matches("<p ").count(), 2);
@@ -1130,7 +1133,7 @@ async fn configured_routes_validate_mid_and_serve_only_cached_dtos() {
         Lyrics {
             candidates: vec![Lyric {
                 source: "lrc",
-                text: lrc_ttml("[00:01]Text", None).unwrap(),
+                text: lrc_ttml_filtered("[00:01]Text", None, None).unwrap(),
             }],
             raw_qrc: false,
             raw_trans: false,

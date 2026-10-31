@@ -75,8 +75,7 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
     $('quality-status').textContent = qualityState === 'loading' ? t('qq.qualitiesLoading')
       : qualityState === 'failed' ? t('qq.qualitiesFailed') : '';
     $('variant-list').replaceChildren(...rows.filter((row) => row.available).map((row) => {
-      const format = row.format === 'Lossless' ? t('qq.formatLossless')
-        : row.format === 'Web audio' ? t('qq.formatWeb') : row.format || t('qq.formatUnknown');
+      const format = row.format || t('qq.formatUnknown');
       const spec = [format,
         row.sizeBytes > 0 ? t('qq.sizeMb', { size: (row.sizeBytes / 1_000_000).toFixed(2) }) : ''].filter(Boolean).join(' · ');
       const label = t(`qq.quality.${row.quality}.label`);
@@ -104,42 +103,17 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
     syncPlaying();
   }
 
-  function ensureLyricsControls() {
-    const section = $('lyrics');
-    let actions = $('lyrics-actions');
-    if (!actions) {
-      actions = el('div', { className: 'qq-lyrics-actions', id: 'lyrics-actions' });
-      section.append(actions);
-    }
-    const controls = [
-      ['lyrics-preview', 'button', 'qq.lyricsPreview'],
-      ['lyrics-qrc', 'a', 'qq.downloadQrc'],
-      ['lyrics-trans', 'a', 'qq.downloadQrcTrans'],
-      ['lyrics-roma', 'a', 'qq.downloadQrcRoma'],
-    ];
-    for (const [id, tag, key] of controls) {
-      if ($(id)) continue;
-      const node = el(tag, { className: tag === 'a' ? 'song-reparse qq-lyrics-download' : 'song-reparse', id,
-        type: tag === 'button' ? 'button' : undefined, textContent: t(key) });
-      if (tag === 'a') node.hidden = true;
-      actions.append(node);
-    }
-    const preview = $('lyrics-preview');
-    if (!preview.dataset.bound) {
-      preview.dataset.bound = 'true';
-      preview.addEventListener('click', () => { lyricsExpanded = !lyricsExpanded; renderLyrics(); });
-    }
-    return { preview, qrc: $('lyrics-qrc'), trans: $('lyrics-trans'), roma: $('lyrics-roma') };
-  }
+  const controls = { preview: $('lyrics-preview'), qrc: $('lyrics-qrc'), trans: $('lyrics-trans'), roma: $('lyrics-roma') };
+  controls.preview.addEventListener('click', () => { lyricsExpanded = !lyricsExpanded; renderLyrics(); });
 
   function renderLyrics() {
-    const controls = ensureLyricsControls();
     const lines = qq.lyricLines(lyric);
     const hasRaw = lyric.rawQrc || lyric.rawTrans || lyric.rawRoma;
     $('lyrics').hidden = !(lines.length || hasRaw);
     controls.preview.hidden = !lines.length;
     controls.preview.textContent = t(lyricsExpanded ? 'qq.lyricsCollapse' : 'qq.lyricsPreview');
     controls.preview.setAttribute('aria-expanded', String(lyricsExpanded));
+    controls.preview.setAttribute('aria-controls', 'lyrics-lines');
     controls.qrc.hidden = !lyric.rawQrc;
     controls.qrc.href = lyric.rawQrc ? qq.rawLyricsUrl(mid, 'qrc') : '';
     controls.trans.hidden = !lyric.rawTrans;
