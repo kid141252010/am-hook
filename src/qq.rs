@@ -1630,7 +1630,14 @@ async fn lyrics(
         )
         .await
     {
-        let song = qq.songs.get(&mid);
+        // Lyrics can be requested before the song details page has populated the
+        // song cache. Reuse the normal song/info path on a cold cache so the
+        // metadata-aware filters see the same title and artists. A failed info
+        // request only drops the context; the lyric candidates remain usable.
+        let song = match qq.songs.get(&mid) {
+            Some(song) => Some(song),
+            None => qq.song(&mid).await.ok(),
+        };
         let context = song.as_ref().map(|song| LyricContext {
             name: &song.name,
             artists: &song.artists,

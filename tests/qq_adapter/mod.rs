@@ -726,6 +726,48 @@ fn full_wet_lyric_new_aligns_available_auxiliary_text_without_changing_lrc() {
     assert!(!text.contains("QrcInfos"));
 }
 
+#[test]
+fn cold_song_info_map_supplies_lyric_filter_context() {
+    let mid = "001ATFiY3pb3y6";
+    let data = json!({
+        (mid): {
+            "track_info": {
+                "mid": mid,
+                "name": "WET",
+                "ar": [{"name": "J.Y. Park"}],
+                "al": {"mid": mid, "name": "WET"}
+            }
+        }
+    });
+    let qq = qq();
+    assert!(qq.songs.get(mid).is_none());
+    assert!(qq.infos.get(mid).is_none());
+    let song = qq
+        .song_from_info(mid, &data)
+        .unwrap_or_else(|error| panic!("song info parse failed: {}", error.0));
+    assert_eq!(song.name, "WET");
+    assert_eq!(song.artists, ["J.Y. Park"]);
+    // song_from_info is the same parser used by info_data for a cold response;
+    // the info LRU remains empty here, while the parsed song supplies context.
+    assert!(qq.infos.get(mid).is_none());
+    let context = LyricContext {
+        name: &song.name,
+        artists: &song.artists,
+    };
+    let raw: Value =
+        serde_json::from_str(include_str!("../fixtures/qq_lyric_new_wet_full.json")).unwrap();
+    let candidates = converted_lyrics_with_context(&raw, Some(context));
+    assert_eq!(candidates.len(), 2);
+    for candidate in candidates {
+        assert_eq!(candidate.text.matches("<p ").count(), 55);
+        assert_eq!(
+            candidate.text.matches("ttm:role=\"x-translation\"").count(),
+            54
+        );
+        assert!(!candidate.text.contains("WET - "));
+    }
+}
+
 fn test_line(start: u64, end: u64, text: &str) -> LyricLine {
     LyricLine {
         start,
