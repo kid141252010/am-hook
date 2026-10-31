@@ -52,16 +52,34 @@ pub struct Cli {
     #[arg(long, env = "AM_HOOK_AMLL_API", default_value = "https://api.amll.dev")]
     pub amll_api: String,
 
-    /// Max wrapper-lite requests relayed per client IP in any 60 seconds (/status not
-    /// counted); further requests get HTTP 429 with Retry-After. 0 = unlimited
+    /// Server-only QQ API base URL (e.g. https://example.invalid/api/web)
+    #[arg(long, env = "AM_HOOK_QQ_API", hide_env_values = true)]
+    pub qq_api: Option<String>,
+
+    /// Server-only outbound proxy for QQ API and media requests (HTTP or SOCKS5)
+    #[arg(long, env = "AM_HOOK_QQ_PROXY", hide_env_values = true)]
+    pub qq_proxy: Option<String>,
+
+    /// Max wrapper-lite and selected QQ requests per client IP in any 60 seconds
+    /// (/status not counted); further requests get HTTP 429 with Retry-After. 0 = unlimited
     #[arg(long, default_value_t = 0)]
     pub client_rate: u32,
 
-    /// Max wrapper-lite requests relayed at once per client IP (/status not counted);
-    /// further requests wait, so one visitor's burst cannot hold every
+    /// Max wrapper-lite and selected QQ requests at once per client IP (/status not
+    /// counted); further requests wait, so one visitor's burst cannot hold every
     /// --wrapper-concurrency permit. 0 = unlimited
     #[arg(long, default_value_t = 0)]
     pub client_concurrency: usize,
+
+    /// Max QQ search, qualities, lyrics and download requests per client IP in any
+    /// 60 seconds. Defaults to --client-rate; 0 = unlimited
+    #[arg(long, env = "AM_HOOK_QQ_CLIENT_RATE")]
+    pub qq_client_rate: Option<u32>,
+
+    /// Max concurrent QQ search, qualities, lyrics and download requests per client
+    /// IP. Defaults to --client-concurrency; 0 = unlimited
+    #[arg(long, env = "AM_HOOK_QQ_CLIENT_CONCURRENCY")]
+    pub qq_client_concurrency: Option<usize>,
 
     /// Request header holding the client IP, set by the reverse proxy in front
     /// (e.g. X-Real-IP, CF-Connecting-IP; the first entry of a list is used).
@@ -102,13 +120,21 @@ impl Cli {
     }
 
     pub fn config(&self) -> Result<Config, String> {
+        crate::qq::outbound_proxy(self.qq_proxy.as_deref())?;
         let wrapper_auth = match &self.wrapper_auth {
             Some(raw) => crate::wrapper::normalize_authorization(raw)?,
             None => None,
         };
+        // Config predates the QQ-specific quota. Keep its public shape stable for
+        // embedders and pass an explicit QQ override to the router through lib.rs.
+        crate::set_qq_client_limit_override(
+            self.qq_client_rate.map(|rate| (rate, self.qq_client_concurrency.unwrap_or(self.client_concurrency)))
+                .or_else(|| self.qq_client_concurrency.map(|concurrency| (self.client_rate, concurrency))),
+        );
         Ok(Config {
             wrapper_url: self.wrapper_url.trim_end_matches('/').to_string(),
             amll_api: self.amll_api.trim_end_matches('/').to_string(),
+            qq_api: self.qq_api.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.trim_end_matches('/').to_owned()),
             amp_keepalive: Duration::from_secs(self.amp_keepalive),
             amp_cache_mb: self.amp_cache_mb,
             wrapper_rate: self.wrapper_rate,
