@@ -629,15 +629,16 @@ fn real_wet_lyric_new_preserves_lines_and_auxiliary_spans_after_unescaped_quotes
         .map(|row| row.as_str())
         .collect();
     // The real response fields were clipped at 2600 characters, without closing
-    // the XML envelopes. QRC contains 28 line headers with complete word timings;
-    // the last line retains four complete words before the unfinished "we".
-    assert_eq!(rows.len(), 28);
+    // the XML envelopes. Three leading production rows are filtered; the title
+    // remains because this test deliberately omits song metadata context.
+    assert_eq!(rows.len(), 25);
     assert!(text.contains("itunes:timing=\"Word\""));
-    assert!(rows[1].contains("Park &quot;</span>"));
-    assert!(rows[1].contains("Asiansoul&quot;</span>"));
-    assert!(rows[27].starts_with("<p begin=\"57.987\" end=\"60.792\">"));
-    assert!(rows[27].contains("<span begin=\"59.650\" end=\"60.202\">wet </span>"));
-    assert!(!rows[27].contains(">we<"));
+    assert!(rows[0].starts_with("<p begin=\"0.391\""));
+    assert!(rows[0].contains(">WET - </span>"));
+    assert!(rows[0].contains("J.Y."));
+    assert!(rows[24].starts_with("<p begin=\"57.987\" end=\"60.792\">"));
+    assert!(rows[24].contains("<span begin=\"59.650\" end=\"60.202\">wet </span>"));
+    assert!(!rows[24].contains(">we<"));
     // The tolerance now recovers all 23 translations for these clipped main rows;
     // the eight nonblank romanization rows and all T6 timing checks remain.
     assert_eq!(
@@ -645,9 +646,9 @@ fn real_wet_lyric_new_preserves_lines_and_auxiliary_spans_after_unescaped_quotes
         23
     );
     assert_eq!(text.matches("<span ttm:role=\"x-roman\">").count(), 8);
-    assert!(rows[8]
+    assert!(rows[5]
         .ends_with("</span><span ttm:role=\"x-translation\">如汽水那般令人充满活力</span></p>"));
-    assert!(rows[5].ends_with(
+    assert!(rows[2].ends_with(
         "</span><span ttm:role=\"x-roman\">ri deu mi  neol  um ji gi myeon </span></p>"
     ));
     assert!(!text.contains("LyricContent"));
@@ -658,7 +659,12 @@ fn real_wet_lyric_new_preserves_lines_and_auxiliary_spans_after_unescaped_quotes
 fn full_wet_lyric_new_aligns_available_auxiliary_text_without_changing_lrc() {
     let raw: Value =
         serde_json::from_str(include_str!("../fixtures/qq_lyric_new_wet_full.json")).unwrap();
-    let candidates = converted_lyrics(&raw);
+    let artists = vec!["J.Y. Park".to_owned()];
+    let context = LyricContext {
+        name: "WET",
+        artists: &artists,
+    };
+    let candidates = converted_lyrics_with_context(&raw, Some(context));
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[0].source, "qrc");
     assert_eq!(candidates[1].source, "lrc");
@@ -668,31 +674,47 @@ fn full_wet_lyric_new_aligns_available_auxiliary_text_without_changing_lrc() {
         .find_iter(text)
         .map(|row| row.as_str())
         .collect();
-    assert_eq!(rows.len(), 59);
+    // The original QRC has 59 main rows. Ht removes the title head and ln
+    // removes the three 词/曲/编曲 rows; the 54 translated rows remain because
+    // those four production rows carry only // placeholders.
+    assert_eq!(rows.len(), 55);
     assert!(text.contains("itunes:timing=\"Word\""));
     assert_eq!(
         text.matches("<span ttm:role=\"x-translation\">").count(),
         54
     );
+    for filtered_start in ["0.391", "1.113", "1.866", "3.705"] {
+        assert!(
+            !text.contains(&format!("<p begin=\"{filtered_start}")),
+            "filtered QRC production/title row at {filtered_start}"
+        );
+    }
     // The supplied full fixture has 16 nonblank qrcroma lines; the other 43
     // contain only whitespace words and must not produce empty role spans.
     assert_eq!(text.matches("<span ttm:role=\"x-roman\">").count(), 16);
-    assert!(rows[5].starts_with("<p begin=\"9.329\" end=\"11.289\">"));
-    assert!(rows[5].ends_with(
+    assert!(rows[1].starts_with("<p begin=\"9.329\" end=\"11.289\">"));
+    assert!(rows[1].ends_with(
         "</span><span ttm:role=\"x-translation\">若节奏让你舞动起来</span><span ttm:role=\"x-roman\">ri deu mi  neol  um ji gi myeon </span></p>"
     ));
-    assert!(rows[58].starts_with("<p begin=\"150.233\" end=\"151.740\">"));
-    assert!(rows[58].ends_with(
+    assert!(rows[54].starts_with("<p begin=\"150.233\" end=\"151.740\">"));
+    assert!(rows[54].ends_with(
         "<span begin=\"151.309\" end=\"151.740\">sweat</span><span ttm:role=\"x-translation\">亲爱的 尽管让我挥洒汗水吧</span></p>"
     ));
-    for row in &rows[..5] {
+    assert!(rows[0].contains(">Yeah</span>"));
+    for row in &rows[..1] {
         assert!(!row.contains("ttm:role="), "{row}");
     }
 
     let lrc = &candidates[1].text;
     assert!(lrc.contains("itunes:timing=\"Line\""));
-    assert_eq!(lrc.matches("<p ").count(), 59);
+    assert_eq!(lrc.matches("<p ").count(), 55);
     assert_eq!(lrc.matches("<span ttm:role=\"x-translation\">").count(), 54);
+    for filtered_start in ["0.390", "1.110", "1.860", "3.700"] {
+        assert!(
+            !lrc.contains(&format!("<p begin=\"{filtered_start}")),
+            "filtered LRC production/title row at {filtered_start}"
+        );
+    }
     assert!(!lrc.contains("x-roman"));
     assert!(lrc.contains(
         "<p begin=\"9.320\" end=\"11.280\">리듬이 널 움직이면<span ttm:role=\"x-translation\">若节奏让你舞动起来</span></p>"
@@ -702,6 +724,88 @@ fn full_wet_lyric_new_aligns_available_auxiliary_text_without_changing_lrc() {
     ));
     assert!(!text.contains("LyricContent"));
     assert!(!text.contains("QrcInfos"));
+}
+
+fn test_line(start: u64, end: u64, text: &str) -> LyricLine {
+    LyricLine {
+        start,
+        end,
+        text: text.to_owned(),
+        words: Vec::new(),
+    }
+}
+
+#[test]
+fn info_filter_uses_role_segmentation_and_preserves_normal_colons() {
+    for label in [
+        "音乐总监：",    // en + nn
+        "制作人/编曲：", // en + nn, then a second segment
+        "总监制：",      // tn + en
+        "Lyricist & Producer:",
+    ] {
+        assert!(is_role_label(label), "{label}");
+    }
+    assert!(!is_role_label("我说：这是正文"));
+
+    let artists = vec!["J.Y. Park".to_owned()];
+    let context = LyricContext {
+        name: "WET",
+        artists: &artists,
+    };
+    let kept = filter_info_lines(
+        vec![
+            test_line(100, 200, "WET - J.Y. Park"),
+            test_line(300, 400, "词：J.Y. Park"),
+            test_line(500, 600, "我说：今天天气很好"),
+            test_line(700, 800, "正文 - 仍然是歌词"),
+        ],
+        Some(context),
+    );
+    assert_eq!(
+        kept.iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>(),
+        ["我说：今天天气很好", "正文 - 仍然是歌词"]
+    );
+}
+
+#[test]
+fn info_filter_applies_other_rules_and_pure_music_tracks() {
+    let artists = vec!["歌手".to_owned()];
+    let context = LyricContext {
+        name: "歌曲",
+        artists: &artists,
+    };
+    let zero = LyricLine {
+        start: 0,
+        end: 0,
+        text: "占位".into(),
+        words: vec![LyricWord {
+            start: 0,
+            end: 0,
+            text: "占位".into(),
+        }],
+    };
+    let kept = filter_info_lines(
+        vec![
+            test_line(100, 200, "未经许可不得使用"),
+            test_line(300, 400, "酷狗音乐人计划"),
+            test_line(500, 600, "Written by: someone"),
+            test_line(700, 800, "歌手："),
+            test_line(900, 1000, "器乐团队：某某"),
+            zero,
+            test_line(1100, 1200, "我说：正文"),
+        ],
+        Some(context),
+    );
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].text, "我说：正文");
+
+    let raw = json!({
+        "qrc": "[0,100]纯音乐，请欣赏(0,0)",
+        "lrc": "[00:00.00]纯音乐，请欣赏",
+    });
+    assert!(converted_lyrics(&raw).is_empty());
 }
 
 #[test]

@@ -228,3 +228,11 @@ T3 离线验证：
 - CI 子集 `node --test tests/qq_source.mjs tests/qq_ui.mjs tests/qq_joc_input.mjs tests/player_artwork.cjs tests/player_quality.mjs tests/playback_quality.mjs`：**6 个文件全部通过**；同组加 `--test-isolation=none` 逐项运行，**59 项通过，0 失败**。覆盖 QQ/Apple MediaSession 取图与 blob 复用、执行真实面板取图/封面函数的同源取图和 Apple 切换、取消旧请求、旧播放条目恢复，及原有详情 `<img>` 与队列直链回归。面板测试隔离了布局/WebGL 初始化，未在此环境渲染真实 AMLL 画布。
 - `cargo clippy --offline -p am-hook --all-targets -- -D warnings`：**通过，无 warning**。
 - 修改过的 JS/MJS 通过 `node --check`，`git diff --check` 通过。
+
+## QQ 歌词制作信息过滤（T8，2026-10-31）
+
+QQ `/lyric/new` 的 QRC 与 LRC 候选在 `render_lyrics` 前过滤主行，移植来源为工作区的 `met-info-filter-reference.md`（MeT-Music UI bundle 逆向规则）。en/tn/nn 三组词表原文保存在 `src/qq.rs` 常量中；`ln` 按词表做完整切分，支持空白、`/`、`／`、`&` 分段以及 nn 后缀延长，只有完整消费到冒号前才命中。
+
+单行规则包括：版权正则 `未经许可.*(不得|禁止)`、含计划及酷狗/音乐人/QQ音乐的推广行、`by:` 署名行、带缓存艺人名且以冒号结尾的 Ut、器乐团队/说唱作曲/戏曲/引用前缀 Kt、首个非空行的 Ht 标题头、零起止时间且所有词时长为零的占位行。整条候选若所有主行都匹配“纯音乐，请（您）欣赏”，按无歌词处理。制作行被删后，翻译和发音仍由现有时间对齐逻辑处理，因此不会为已删主行挂载辅助 span。
+
+标题/艺人上下文取自适配器已有的 `songs` LRU 缓存：歌词请求只读取 `qq.songs.get(mid)` 的 `Song.name` 与 `Song.artists`，缓存没有时跳过 Ht 的歌名/艺人子规则和 Ut，其他规则仍执行；不会为过滤额外发起歌曲信息请求。

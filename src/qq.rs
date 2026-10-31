@@ -13,9 +13,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     num::NonZeroUsize,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -1268,6 +1268,180 @@ fn take_auxiliary(entries: &mut BTreeMap<u64, String>, start: u64) -> Option<Str
         .filter(|&time| time.abs_diff(start) <= 120)?;
     entries.remove(&nearest)
 }
+
+// MeT-Music UI's role vocabulary, copied from met-info-filter-reference.md.
+// The source bundle lowercases these dot-separated words before matching.
+const INFO_EN: &str = "作词.作曲.说唱作曲.原唱.中文填词.说唱填词.填词.改编词.词曲.作词作曲.填詞.中文填詞.词.曲.原.作詞.詞.总制作人.联合制作人.音乐制作.监制.音乐总监.项目总监.营销推广.编曲.編曲.制作.總製作人.聯合製作人.製作.音樂製作.監製.混音.母带.和声.和音.配唱.人声.录音勤务.录音.声乐指导.配乐.音频编辑.剪辑.音乐编辑.母帶.錄音.剪輯.和聲.器乐团队.戏曲.引用.乐队.吉他.贝斯.鼓.键盘.弦乐.管乐.打击乐.演唱.合唱.貝斯.鍵盤.弦樂.出品.特别鸣谢.歌曲营销.策划.策劃.运营.運營.推广.推廣.项目企划.企划.统筹.总监.總監.版权.版權.发行.商务.营销.宣传.發行.企劃.統籌.OP.SP.Lyrics.Lyricist.Lyrics by.Written by.Words by.Music.Music by.Composer.Composed by.Arranger.Arranged by.Arrangement.Producer.Produced by.Executive Producer.Co-Producer.Mixing.Mixed by.Mixing Engineer.Mastering.Mastered by.Mastering Engineer.Recording.Recorded by.Recording Engineer.Vocal Director.Backing Vocals.Vocal.Vocals.Backing Vocal.Crowd Vocals.Studio.Guitar.Bass.Drums.Keyboard.Piano.Strings.Programming.Publisher.Label.Coordinator";
+const INFO_TN: &str = "音频.音頻.总.總.大.联合.聯合.共同.执行.執行.项目.項目.艺术.藝術.音乐.音樂.人声.人聲.弦乐.弦樂.乐队.樂隊.和声.和聲.歌曲.版权.版權.宣传.宣傳";
+const INFO_NN: &str = "师.師.工程师.工程師.管理.后期.後期.室.棚.助理.统筹.統籌.处理.處理.录音.錄音.编写.編寫.指导.指導.协力.協力.总监.總監.监制.監製.编辑.編輯.策划.策劃.企划.企劃.人.方";
+
+#[derive(Clone, Copy)]
+struct LyricContext<'a> {
+    name: &'a str,
+    artists: &'a [String],
+}
+
+fn starts_with_role(text: &str, pos: usize, word: &str) -> bool {
+    text.get(pos..)
+        .and_then(|rest| rest.get(..word.len()))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(word))
+}
+
+fn match_roles(text: &str, pos: usize, words: &str, out: &mut HashSet<usize>) {
+    for word in words.split('.') {
+        if starts_with_role(text, pos, word) {
+            out.insert(pos + word.len());
+        }
+    }
+}
+
+fn skip_whitespace(text: &str, mut pos: usize) -> usize {
+    while let Some(ch) = text.get(pos..).and_then(|rest| rest.chars().next()) {
+        if !ch.is_whitespace() {
+            break;
+        }
+        pos += ch.len_utf8();
+    }
+    pos
+}
+
+/// Match a complete role label before the first colon. This is deliberately a
+/// small parser rather than a prefix list: labels such as "音乐总监:",
+/// "制作人/编曲:" and "总监制:" are composed from the three vocabularies.
+fn is_role_label(text: &str) -> bool {
+    let Some(colon) = text
+        .char_indices()
+        .find_map(|(pos, ch)| matches!(ch, ':' | '：').then_some(pos))
+    else {
+        return false;
+    };
+    let label = text[..colon].trim_end().to_lowercase();
+    if label.is_empty() {
+        return false;
+    }
+    let end = label.len();
+    let mut segment_starts = HashSet::from([0]);
+    let mut after_prefix = HashSet::new();
+    let mut role_ends = HashSet::new();
+    let mut positions: Vec<usize> = label.char_indices().map(|(pos, _)| pos).collect();
+    positions.push(end);
+
+    for pos in positions {
+        if role_ends.contains(&pos) {
+            if pos == end {
+                return true;
+            }
+            match_roles(&label, pos, INFO_NN, &mut role_ends);
+            let mut next = skip_whitespace(&label, pos);
+            if let Some(ch) = label.get(next..).and_then(|rest| rest.chars().next()) {
+                if matches!(ch, '/' | '／' | '&') {
+                    next += ch.len_utf8();
+                    next = skip_whitespace(&label, next);
+                }
+            }
+            segment_starts.insert(pos);
+            segment_starts.insert(next);
+        }
+        if segment_starts.contains(&pos) {
+            match_roles(&label, pos, INFO_TN, &mut after_prefix);
+        }
+        if segment_starts.contains(&pos) || after_prefix.contains(&pos) {
+            match_roles(&label, pos, INFO_EN, &mut role_ends);
+        }
+    }
+    false
+}
+
+fn copyright_info(text: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"未[经經].*[许許]可.*(?:不得|禁止)").unwrap())
+        .is_match(text)
+}
+
+fn is_prefix_info(text: &str) -> bool {
+    let text = text.trim_start();
+    ["器乐团队", "说唱作曲", "戏曲", "引用"]
+        .iter()
+        .any(|prefix| {
+            text.strip_prefix(prefix).is_some_and(|rest| {
+                rest.trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| matches!(ch, ':' | '：'))
+            })
+        })
+}
+
+fn has_artist_header(text: &str, context: Option<LyricContext<'_>>) -> bool {
+    let trimmed = text.trim();
+    (trimmed.ends_with(':') || trimmed.ends_with('：'))
+        && context.is_some_and(|ctx| {
+            ctx.artists
+                .iter()
+                .filter(|artist| !artist.is_empty())
+                .any(|artist| text.contains(artist))
+        })
+}
+
+fn title_header(line: &LyricLine, first_nonempty: bool, context: Option<LyricContext<'_>>) -> bool {
+    if !first_nonempty {
+        return false;
+    }
+    let has_context = context.is_some_and(|ctx| {
+        (!ctx.name.is_empty() && line.text.contains(ctx.name))
+            || ctx
+                .artists
+                .iter()
+                .filter(|artist| !artist.is_empty())
+                .any(|artist| line.text.contains(artist))
+    });
+    (line.text.contains('-') && has_context) || (line.start == 0 && line.text.contains(" - "))
+}
+
+fn is_info_line(line: &LyricLine, first_nonempty: bool, context: Option<LyricContext<'_>>) -> bool {
+    let text = &line.text;
+    let lower = text.to_ascii_lowercase();
+    is_role_label(text)
+        || copyright_info(text)
+        || (text.contains("计划")
+            && ["酷狗", "音乐人", "QQ音乐"]
+                .iter()
+                .any(|term| text.contains(term)))
+        || lower.contains("by:")
+        || lower.contains("by：")
+        || has_artist_header(text, context)
+        || is_prefix_info(text)
+        || title_header(line, first_nonempty, context)
+        || (line.start == 0
+            && line.end == 0
+            && line.words.iter().all(|word| word.start == word.end))
+}
+
+fn pure_music_line(text: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"纯音乐[，,]?\s*请(您)?欣赏").unwrap())
+        .is_match(text)
+}
+
+fn filter_info_lines(lines: Vec<LyricLine>, context: Option<LyricContext<'_>>) -> Vec<LyricLine> {
+    let mut first_seen = false;
+    lines
+        .into_iter()
+        .filter_map(|line| {
+            let nonempty = !line.text.trim().is_empty();
+            let first = nonempty && !first_seen;
+            if nonempty {
+                first_seen = true;
+            }
+            (!is_info_line(&line, first, context)).then_some(line)
+        })
+        .collect()
+}
+
+fn all_pure_music(lines: &[LyricLine]) -> bool {
+    !lines.is_empty() && lines.iter().all(|line| pure_music_line(&line.text))
+}
+
 fn render_lyrics(
     lines: Vec<LyricLine>,
     word: bool,
@@ -1313,6 +1487,7 @@ fn render_lyrics(
     out.push_str("</div></body>");
     Some(wrap(&out, word))
 }
+#[cfg(test)]
 fn lrc_ttml(text: &str, translation: Option<&str>) -> Option<String> {
     render_lyrics(
         lrc_lines(text),
@@ -1321,6 +1496,7 @@ fn lrc_ttml(text: &str, translation: Option<&str>) -> Option<String> {
         Vec::new(),
     )
 }
+#[cfg(test)]
 fn qrc_ttml(text: &str, translation: Option<&str>, pronunciation: Option<&str>) -> Option<String> {
     render_lyrics(
         qrc_lines(text),
@@ -1329,14 +1505,52 @@ fn qrc_ttml(text: &str, translation: Option<&str>, pronunciation: Option<&str>) 
         pronunciation.map(qrc_lines).unwrap_or_default(),
     )
 }
+fn lrc_ttml_filtered(
+    text: &str,
+    translation: Option<&str>,
+    context: Option<LyricContext<'_>>,
+) -> Option<String> {
+    let lines = lrc_lines(text);
+    if all_pure_music(&lines) {
+        return None;
+    }
+    render_lyrics(
+        filter_info_lines(lines, context),
+        false,
+        translation.map(lrc_lines).unwrap_or_default(),
+        Vec::new(),
+    )
+}
+fn qrc_ttml_filtered(
+    text: &str,
+    translation: Option<&str>,
+    pronunciation: Option<&str>,
+    context: Option<LyricContext<'_>>,
+) -> Option<String> {
+    let lines = qrc_lines(text);
+    if all_pure_music(&lines) {
+        return None;
+    }
+    render_lyrics(
+        filter_info_lines(lines, context),
+        true,
+        translation.map(lrc_lines).unwrap_or_default(),
+        pronunciation.map(qrc_lines).unwrap_or_default(),
+    )
+}
+#[cfg(test)]
 fn converted_lyrics(raw: &Value) -> Vec<Lyric> {
+    converted_lyrics_with_context(raw, None)
+}
+fn converted_lyrics_with_context(raw: &Value, context: Option<LyricContext<'_>>) -> Vec<Lyric> {
     let raw = raw.get("data").unwrap_or(raw);
     let mut candidates = Vec::new();
     if let Some(text) = field_text(raw, "qrc").and_then(|text| {
-        qrc_ttml(
+        qrc_ttml_filtered(
             text,
             field_text(raw, "qrctrans"),
             field_text(raw, "qrcroma"),
+            context,
         )
     }) {
         candidates.push(Lyric {
@@ -1344,8 +1558,8 @@ fn converted_lyrics(raw: &Value) -> Vec<Lyric> {
             text,
         });
     }
-    if let Some(text) =
-        field_text(raw, "lrc").and_then(|text| lrc_ttml(text, field_text(raw, "lrctrans")))
+    if let Some(text) = field_text(raw, "lrc")
+        .and_then(|text| lrc_ttml_filtered(text, field_text(raw, "lrctrans"), context))
     {
         candidates.push(Lyric {
             source: "lrc",
@@ -1416,7 +1630,12 @@ async fn lyrics(
         )
         .await
     {
-        candidates.extend(converted_lyrics(&raw));
+        let song = qq.songs.get(&mid);
+        let context = song.as_ref().map(|song| LyricContext {
+            name: &song.name,
+            artists: &song.artists,
+        });
+        candidates.extend(converted_lyrics_with_context(&raw, context));
     }
     let data = Lyrics { candidates };
     if !data.candidates.is_empty() {
