@@ -94,11 +94,6 @@ export function supportsMime(mime, environment = globalThis) {
 
 export function clearMimeSupportCache() { mimeSupport.clear(); }
 
-// player.js is a classic script and cannot import this ESM module synchronously.
-// Register the same probe so QQ mode detection has one implementation in both paths.
-globalThis.AmHookQq = { ...(globalThis.AmHookQq || {}), supportsMime };
-if (globalThis.AmHook && typeof globalThis.AmHook === 'object') globalThis.AmHook.supportsMime = supportsMime;
-
 /** WET stsd: DA/DA448/DA1500 = ac-4/dac4; DAEAC3 = ec-3/dec3 (2026-10-31).
  * QQ's fixed Dolby pipelines determine those codecs, including for saved queues.
  * EC-3 remains on the JOC pipeline; baseline codecs are native, while
@@ -175,7 +170,15 @@ export function qualityVariants(rows) {
 }
 async function request(path, signal) {
   const response = await fetch(path, { signal });
-  if (!response.ok) throw new Error(`QQ HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`QQ HTTP ${response.status}`);
+    error.status = response.status;
+    if (response.headers?.get) {
+      const retryAfter = response.headers.get('Retry-After');
+      if (retryAfter) error.retryAfter = retryAfter;
+    }
+    throw error;
+  }
   return response.json();
 }
 export async function searchSongs(q, { limit = 30, offset = 0, signal } = {}) {
@@ -199,6 +202,7 @@ export function qualityRows(data, id, detect, environment = globalThis) {
 }
 export async function qualities(id, signal, { basic = false } = {}) {
   const query = basic ? '?basic=1' : '';
+  await capabilitiesReady;
   return qualityRows(await request(`/qq/song/${mid(id)}/qualities${query}`, signal), id);
 }
 const DEFAULT_QUALITY = { hires: 'RS', lossless: 'SQ', dolby: 'DAEAC3', high: 'HQ', standard: 'WEB' };

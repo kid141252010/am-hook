@@ -14,7 +14,7 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
   const $ = (id) => root.querySelector(`#${id}`);
   const mid = url.pathname.match(/^\/qq-song\/([0-9A-Za-z]{1,32})\/?$/)?.[1];
   let track = null;
-  let rows = qq.qualityRows(null, mid);
+  let rows = [];
   let qualityState = 'loading';
   let lyric = { song: null, rawQrc: false, rawTrans: false, rawRoma: false };
   let lyricsExpanded = false;
@@ -152,6 +152,14 @@ export function mount({ root, url, signal, player, onLangChange, toast }) {
   signal.addEventListener('abort', prefs.onChange((section) => { if (section === 'playback') syncPlaying(); }), { once: true });
   onLangChange(render);
   render();
+
+  // Capabilities may replace the bundled table. Wait before the first quality
+  // row is read; a failed request leaves the bundled fallback in place.
+  qq.capabilitiesReady.then(() => {
+    if (signal.aborted) return;
+    rows = qq.qualityRows(null, mid);
+    renderQualities();
+  });
 
   // Metadata, qualities and lyrics fail independently; a missing lyric never hides the song.
   qq.song(mid, signal).then((value) => {

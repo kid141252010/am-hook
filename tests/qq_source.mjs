@@ -131,6 +131,8 @@ test('QQ consumes the complete capabilities table at module startup and keeps fa
     const loaded = await import(`../src/ui/sources/qq.mjs?capabilities-${Date.now()}`);
     await loaded.capabilitiesReady;
     assert.equal(requested, 1);
+    assert.equal(globalThis.AmHookQq?.supportsMime, undefined);
+    assert.equal(globalThis.AmHook?.supportsMime, undefined);
     assert.equal(loaded.playbackInfo('HQ').codec, 'vorbis');
     assert.equal(loaded.playbackInfo('HQ').contentType, 'audio/ogg; codecs="vorbis"');
     assert.equal(loaded.capabilities().length, 20);
@@ -298,7 +300,7 @@ function playerHarness() {
   Object.assign(player, {
     source: 'apple', current: null, queue: null, sourceContexts: new Map(), playToken: 0, queueSerial: 0, nextSerial: 0,
     shuffle: false, repeat: 'off', root: { hidden: true }, unsupportedListeners: new Set(),
-    audio: { paused: true, currentTime: 0, duration: 269, async play() { this.paused = false; }, pause() { this.paused = true; }, load() {}, addEventListener() {} },
+    audio: { paused: true, currentTime: 0, duration: 269, async play() { this.paused = false; }, pause() { this.paused = true; }, load() {}, addEventListener() {}, getAttribute() { return this.src || null; } },
   });
   player.clock = player.audio;
   for (const name of ['closeQualityPanel', 'layout', 'emit', 'renderQueue', 'renderModes', 'setLoading', 'renderToggle', 'renderTrackText', 'renderArtwork', 'renderMode', 'updateMediaSession', 'renderProgress', 'prepareNext', 'extendQueue', 'show']) player[name] = () => {};
@@ -316,6 +318,45 @@ test('QQ plays the local 302 route through native audio without asking Apple for
   assert.equal(player.queue.entries[0].artwork, player.current.artwork);
   assert.equal(player.audio.src, `/qq/song/${dto.id}/play?quality=HQ`);
   assert.equal(player.audio.paused, false);
+});
+
+test('QQ native play rejection advances through the planned mode list', async () => {
+  const player = playerHarness();
+  const attempted = [];
+  player.tryMode = async (mode) => {
+    attempted.push(mode);
+    if (mode === 'native') throw new Error('unsupported native source');
+  };
+  await player.start(qq.qualityEntry(qq.toTrack(dto), 'DAEAC3'), { modes: ['native', 'joc2'] });
+  assert.deepEqual(attempted, ['native', 'joc2']);
+  assert.equal(player.current.mode, 'joc2');
+});
+
+test('QQ native media error hands off with the live paused state and preserves the queue', async () => {
+  const player = playerHarness();
+  const attempted = [];
+  const item = qq.qualityEntry(qq.toTrack(dto), 'DAEAC3');
+  const next = qq.entryOf(qq.toTrack({ id: 'next' }));
+  player.tryMode = async (mode, _item, _resumeAt, _token, paused) => {
+    attempted.push({ mode, paused });
+    if (mode === 'native') player.audio.paused = false;
+  };
+  await player.start(item, { modes: ['native', 'joc2'] });
+  player.queue = { entries: [item, next], pos: 0 };
+  player.audio.currentTime = 18;
+  player.audio.paused = true; // changed after native startup: handoff must read this value
+  player.audio.error = { code: 4 }; // MEDIA_ERR_SRC_NOT_SUPPORTED
+  player.handleAudioError();
+  await new Promise(setImmediate);
+  assert.deepEqual(attempted, [{ mode: 'native', paused: false }, { mode: 'joc2', paused: true }]);
+  assert.equal(player.current.mode, 'joc2');
+  assert.equal(player.current.quality, 'DAEAC3');
+  assert.deepEqual(player.queue.entries.map((entry) => entry.track), [dto.id, 'next']);
+
+  player.audio.error = { code: 2 }; // MEDIA_ERR_NETWORK must not restart another mode
+  player.handleAudioError();
+  await new Promise(setImmediate);
+  assert.equal(attempted.length, 2);
 });
 
 test('QQ lazily resolves defaults per track; changing the setting preserves current and manual quality', async () => {

@@ -152,6 +152,34 @@ test('QQ panel retries a failed qualities request when reopened and caches empty
   assert.equal(requests, 2);
 });
 
+test('QQ default quality retries one 429 using Retry-After and keeps the returned tier', async () => {
+  const player = playerHarness();
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    if (requests === 1) return { ok: false, status: 429, headers: new Headers({ 'Retry-After': '0' }) };
+    return { ok: true, json: async () => ({ qualities: [{ quality: 'RS', available: true, sizeBytes: 100 }] }) };
+  };
+  await player.playQueue([qq.entryOf(track())]);
+  assert.equal(requests, 2);
+  assert.equal(player.current.quality, 'RS');
+  assert.equal(player.audio.src, '/qq/song/song/play?quality=RS');
+});
+
+test('QQ default quality surfaces a second 429 failure without silently starting HQ', async () => {
+  const player = playerHarness();
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return { ok: false, status: 429, headers: new Headers({ 'Retry-After': '0' }) };
+  };
+  await player.playQueue([qq.entryOf(track())]);
+  assert.equal(requests, 2);
+  assert.equal(player.current, null);
+  assert.equal(player.audio.src, undefined);
+  assert.equal(typeof player.error, 'function');
+});
+
 test('panel selection resumes native QQ at the same time and retains queue order, repeat payload and selection', async () => {
   const player = playerHarness();
   await player.playQueue([qq.entryOf(track()), qq.entryOf(track('next'))]);

@@ -71,6 +71,16 @@ pub struct Cli {
     #[arg(long, default_value_t = 0)]
     pub client_concurrency: usize,
 
+    /// Max QQ search, qualities, lyrics and download requests per client IP in any
+    /// 60 seconds. Defaults to --client-rate; 0 = unlimited
+    #[arg(long, env = "AM_HOOK_QQ_CLIENT_RATE")]
+    pub qq_client_rate: Option<u32>,
+
+    /// Max concurrent QQ search, qualities, lyrics and download requests per client
+    /// IP. Defaults to --client-concurrency; 0 = unlimited
+    #[arg(long, env = "AM_HOOK_QQ_CLIENT_CONCURRENCY")]
+    pub qq_client_concurrency: Option<usize>,
+
     /// Request header holding the client IP, set by the reverse proxy in front
     /// (e.g. X-Real-IP, CF-Connecting-IP; the first entry of a list is used).
     /// Only set it when every request passes through that proxy, otherwise clients can
@@ -115,6 +125,12 @@ impl Cli {
             Some(raw) => crate::wrapper::normalize_authorization(raw)?,
             None => None,
         };
+        // Config predates the QQ-specific quota. Keep its public shape stable for
+        // embedders and pass an explicit QQ override to the router through lib.rs.
+        crate::set_qq_client_limit_override(
+            self.qq_client_rate.map(|rate| (rate, self.qq_client_concurrency.unwrap_or(self.client_concurrency)))
+                .or_else(|| self.qq_client_concurrency.map(|concurrency| (self.client_rate, concurrency))),
+        );
         Ok(Config {
             wrapper_url: self.wrapper_url.trim_end_matches('/').to_string(),
             amll_api: self.amll_api.trim_end_matches('/').to_string(),

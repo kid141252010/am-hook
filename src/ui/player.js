@@ -99,11 +99,11 @@
   /** QQ files are unencrypted: JOC only needs the renderer, native files use HTMLAudio capabilities. */
   function detectQqModes(item, audio) {
     if (item.playback === 'download') return [];
-    const mime = item.contentType || 'audio/mpeg';
+    const mime = item.contentType || (item.playback === 'joc' ? 'audio/mp4; codecs="ec-3"' : 'audio/mpeg');
     // Uncached probe; qq.mjs's cached supportsMime must not be reused here because
     // mode planning has to reflect the browser's current answer. The JOC branch
-    // counts only MediaSource support as native passthrough (an <audio> element
-    // accepting the MIME does not imply the system Atmos pipeline gets the stream).
+    // follows the AM ec-3 MediaSource policy and avoids canPlayType's "maybe"
+    // false positives.
     const MS = global.ManagedMediaSource || global.MediaSource;
     const msNative = !!(MS && typeof MS.isTypeSupported === 'function' && MS.isTypeSupported(mime));
     if (item.playback === 'joc') {
@@ -397,7 +397,22 @@
         // the info-backed rows only. This keeps queue startup free of URL
         // probes; the full qualities request remains for the detail panel.
         let rows;
-        try { rows = await qq.qualities(entry.track, undefined, { basic: true }); } catch { /* use the stable HQ fallback */ }
+        try {
+          rows = await qq.qualities(entry.track, undefined, { basic: true });
+        } catch (error) {
+          if (error?.status === 429) {
+            let delay = Number(error.retryAfter);
+            if (!Number.isFinite(delay)) {
+              const date = Date.parse(error.retryAfter || '');
+              delay = Number.isFinite(date) ? Math.max(0, (date - Date.now()) / 1000) : 0;
+            }
+            await new Promise((resolve) => setTimeout(resolve, Math.min(3000, Math.max(0, delay * 1000))));
+            // A second 429/error is deliberately allowed to reach playAt so the
+            // existing player error surface tells the user instead of changing tier.
+            rows = await qq.qualities(entry.track, undefined, { basic: true });
+          }
+          // Non-rate-limit failures retain the historical HQ fallback.
+        }
         if (rows) {
           row = qq.pickDefaultQuality(rows, preference);
           if (!row) throw Object.assign(new Error(t('album.noPlayable', { name: entry.name })), { noPlayable: true });
@@ -2261,23 +2276,7 @@
       ['timeupdate', 'progress', 'durationchange', 'loadedmetadata'].forEach((ev) => a.addEventListener(ev, () => this.renderProgress()));
       ['play', 'pause', 'playing', 'waiting', 'ended'].forEach((ev) => a.addEventListener(ev, () => { this.renderToggle(); this.emit(); }));
       a.addEventListener('ended', () => this.ended());
-      a.addEventListener('error', () => {
-        const error = new Error(t('player.errorGeneric', { hint: fallbackHint() }));
-        // Some Safari versions report an unsupported EC-3 source through the
-        // media element error event even when play() did not reject. Feed that
-        // event into the same mode loop used by promise failures.
-        if (this.nativeAttempt && this.nativeAttempt.token === this.playToken && this.current?.mode === 'native') {
-          this.nativeAttempt.reject(error);
-          return;
-        }
-        if (this.nativeFallback && this.current?.source === 'qq' && this.current.mode === 'native') {
-          this.nativeFallback(error);
-          return;
-        }
-        if (!this.attempting && this.current && this.current.mode !== 'mse' && this.audio.getAttribute('src')) {
-          this.showError(() => t('player.errorGeneric', { hint: fallbackHint() }));
-        }
-      });
+      a.addEventListener('error', () => this.handleAudioError());
 
       if ('mediaSession' in navigator) {
         const ms = navigator.mediaSession;
@@ -2290,6 +2289,26 @@
           ms.setActionHandler('nexttrack', () => this.next());
           ms.setActionHandler('previoustrack', () => this.previous());
         } catch {}
+      }
+    }
+
+    handleAudioError() {
+      const error = new Error(t('player.errorGeneric', { hint: fallbackHint() }));
+      const code = this.audio.error?.code;
+      const unsupported = code === 3 || code === 4;
+      // Some Safari versions report an unsupported EC-3 source through the
+      // media element error event even when play() did not reject. Feed that
+      // event into the same mode loop used by promise failures.
+      if (unsupported && this.nativeAttempt && this.nativeAttempt.token === this.playToken && this.current?.mode === 'native') {
+        this.nativeAttempt.reject(error);
+        return;
+      }
+      if (unsupported && this.nativeFallback && this.current?.source === 'qq' && this.current.mode === 'native') {
+        this.nativeFallback(error);
+        return;
+      }
+      if (!this.attempting && this.current && this.current.mode !== 'mse' && this.audio.getAttribute('src')) {
+        this.showError(() => t('player.errorGeneric', { hint: fallbackHint() }));
       }
     }
 
@@ -3065,7 +3084,7 @@
                 this.nativeFallback = null;
                 const transport = this.transport();
                 void this.start(item, { force: true, resumeAt: transport.currentTime,
-                  paused, modes: modes.slice(nextMode) });
+                  paused: transport.paused, modes: modes.slice(nextMode) });
               };
               this.nativeFallback = fallback;
             }
