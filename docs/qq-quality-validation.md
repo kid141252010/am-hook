@@ -80,6 +80,20 @@ T5 离线验证：
 - `cargo clippy --offline -p am-hook --all-targets -- -D warnings`、修改文件的 Rust 格式检查与 `git diff --check`：通过。
 - `node scripts/build-static.mjs target/t5-static --cloudflare`：211 个资源生成成功；Rust 的 `assets::tests::build_static_matches` 通过。额外执行 `tests/serverless.mjs` 时，11 项通过，静态构建项因沙箱中 Node `spawnSync /usr/bin/node EPERM` 失败（单独执行 `execFileSync(node, ['--version'])` 同样复现），不计入上述 79 项通过结果。
 
+## T6：未转义引号截断 QRC 信封（2026-10-31）
+
+T5 的 `LyricContent` 属性正则以第一个同类引号结束捕获，无法处理 QQ 返回的非标准 XML：WET 制作人员行包含 `Park "(1349,180)The … Asiansoul"`，引号没有 XML 实体转义，导致后续主歌词和辅助轨无法正常生成。任务提供的线上证据为 QRC 候选仅 437 字符、无翻译及罗马音；本轮使用监工提供的真实响应 `tests/fixtures/qq_lyric_new_wet_real.json` 离线复现，旧代码仅生成 2 行（包含在引号处截断的制作人员行）。
+
+现在由 `qrc_content` 统一提取 QRC / qrcroma 的正文：从 `LyricContent=` 后的起始引号开始，读取至匹配的结束引号、可选空白及 `/>`，允许正文包含未转义引号和真实换行，支持双引号及单引号信封。真实 fixture 的字段最多保留 2600 字符，`qrc` / `qrcroma` 均缺少结束定界；这种情况下保留正文至输入末尾，再由原解析器使用可用的完整逐字时间。`&#10;`、`&#13;` 等既有实体还原顺序及无信封纯文本兼容保持一致。独立单测覆盖未转义引号、多行、单引号、纯文本和缺失结束定界，并检查不会吞入后续信封元素。
+
+新的 `converted_lyrics` 回归以真实 fixture 为准，断言 QRC 候选含 **28 个主行、3 个 `x-translation` span 和 8 个 `x-roman` span**，同时核对带引号的正文和末行时间。行数口径为截断内容中含至少一个完整逐字时间的主行：前 27 行完整，最后一行 `[57987,2805]` 保留四个完整词，末尾未完成的 `we` 不输出，不将样本当作完整歌曲。翻译沿用 T5 的毫秒精确匹配，真实 LRC 大部分时间仅到百分之一秒，因此只有 3 个翻译时间与这 28 个 QRC 行起始时间完全一致；罗马音有 8 个非空匹配行。旧合成 fixture 保留用于 offset、乱序及缺失辅助轨等边界测试，相关辅助函数和测试已明确标为 `synthetic`。
+
+T6 离线验证：
+
+- `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**79 项通过，0 失败，仅跳过指定 3 项 wrapper 测试**。
+- `node --test --test-isolation=none tests/alac_check.mjs tests/joc_wasm.mjs tests/agent_duet.mjs tests/qq_source.mjs tests/qq_ui.mjs tests/qq_joc_input.mjs tests/player_artwork.cjs tests/player_quality.mjs tests/playback_quality.mjs`：**82 项通过，0 失败**，覆盖 CI 的 QQ、歌词对唱、ALAC 及 JOC 子集。
+- `cargo clippy --offline -p am-hook --all-targets -- -D warnings`：通过，无 warning。修改文件使用已安装的 `rustfmt +nightly-2026-08-20` 格式检查，`git diff --check` 通过。
+
 ## 在线播放默认音质（T3，2026-10-31）
 
 设置中心新增「在线播放默认音质 / Default streaming quality」，QQ 与 Apple Music 共用一个值。沿用 `prefs.mjs` 的 `am-hook:settings` localStorage 记录，存于 `playback.quality`；取值为 `hires / lossless / dolby / high / standard`，默认 `hires`。旧记录缺少该分组或值无效时恢复 Hi-Res，修改与其他标签页的 storage 事件沿用现有同步机制。

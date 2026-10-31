@@ -399,15 +399,65 @@ fn qrc_word_timing_and_optional_fields_fall_through_safely() {
     );
     assert_eq!(field_text(&json!({"lrc":"[00:01]text"}), "qrc"), None);
 }
-fn wet_lyrics() -> Value {
+#[test]
+fn qrc_content_preserves_unescaped_quotes_until_the_element_delimiter() {
+    let content =
+        r#"[1113,753]词：J.Y. (1113,236)Park "(1349,180)The (1529,169)Asiansoul"(1698,168)"#;
+    let envelope = format!(
+        r#"<QrcInfos><Lyric_1 LyricType="1" LyricContent="{content}"/><Lyric_2 LyricContent="unused"/></QrcInfos>"#
+    );
+    assert_eq!(qrc_content(&envelope), content);
+}
+
+#[test]
+fn qrc_content_handles_multiline_values_whitespace_and_entities() {
+    let envelope = "<QrcInfos>\n<Lyric_1 LyricContent \t= \"[1000,500]A &quot;B&quot;(1000,500)\r\n[2000,500]C(2000,500)&#13;&#10;[3000,500]&lt;&gt;&apos;&amp;&amp;quot;(3000,500)\" \t\n/>\n</QrcInfos>";
+    assert_eq!(
+        qrc_content(envelope),
+        "[1000,500]A \"B\"(1000,500)\r\n[2000,500]C(2000,500)\r\n[3000,500]<>'&&quot;(3000,500)"
+    );
+}
+
+#[test]
+fn qrc_content_handles_single_quoted_envelopes_with_unescaped_apostrophes() {
+    let content = "[1000,500]Don't '(1000,500)\n[2000,500]stop'(2000,500)";
+    for delimiter in ["'/>", "' \n/>"] {
+        let envelope = format!("<Lyric_1 LyricContent='{content}{delimiter}");
+        assert_eq!(qrc_content(&envelope), content);
+    }
+}
+
+#[test]
+fn qrc_content_keeps_plain_text_compatible() {
+    let content = "[1000,500]Park \"(1000,500)&#10;[2000,500]&amp;(2000,500)";
+    assert_eq!(
+        qrc_content(content),
+        "[1000,500]Park \"(1000,500)\n[2000,500]&(2000,500)"
+    );
+    assert_eq!(
+        qrc_content("encrypted-unavailable"),
+        "encrypted-unavailable"
+    );
+}
+
+#[test]
+fn qrc_content_keeps_available_content_when_the_envelope_is_clipped() {
+    let content = "[1000,500]Park \"(1000,500)\n[2000,500]Don't(2000,500)unfinished";
+    for quote in ['"', '\''] {
+        let envelope = format!("<Lyric_1 LyricContent={quote}{content}");
+        assert_eq!(qrc_content(&envelope), content);
+    }
+}
+
+fn synthetic_wet_lyrics() -> Value {
     // Reduced /lyric/new response for WET (001ATFiY3pb3y6): Korean QRC,
     // Chinese LRC translation and romanized QRC XML. Text/times are synthetic.
     serde_json::from_str(include_str!("../fixtures/qq_lyric_new_wet.json")).unwrap()
 }
 
 #[test]
-fn wet_lyric_new_aligns_translation_and_romanization_in_amll_inline_format() {
-    let raw = wet_lyrics();
+fn synthetic_wet_lyric_new_aligns_translation_and_romanization_in_amll_inline_format() {
+    let raw = synthetic_wet_lyrics();
     let row_pattern = Regex::new(r"<p .*?</p>").unwrap();
     for raw in [&raw, &raw["data"]] {
         let candidates = converted_lyrics(raw);
@@ -459,10 +509,48 @@ fn wet_lyric_new_aligns_translation_and_romanization_in_amll_inline_format() {
 }
 
 #[test]
+fn real_wet_lyric_new_preserves_lines_and_auxiliary_spans_after_unescaped_quotes() {
+    let raw: Value =
+        serde_json::from_str(include_str!("../fixtures/qq_lyric_new_wet_real.json")).unwrap();
+    let candidates = converted_lyrics(&raw);
+    assert_eq!(candidates.len(), 2);
+    let text = &candidates
+        .iter()
+        .find(|lyric| lyric.source == "qrc")
+        .unwrap()
+        .text;
+    let rows: Vec<_> = Regex::new(r"<p .*?</p>")
+        .unwrap()
+        .find_iter(text)
+        .map(|row| row.as_str())
+        .collect();
+    // The real response fields were clipped at 2600 characters, without closing
+    // the XML envelopes. QRC contains 28 line headers with complete word timings;
+    // the last line retains four complete words before the unfinished "we".
+    assert_eq!(rows.len(), 28);
+    assert!(text.contains("itunes:timing=\"Word\""));
+    assert!(rows[1].contains("Park &quot;</span>"));
+    assert!(rows[1].contains("Asiansoul&quot;</span>"));
+    assert!(rows[27].starts_with("<p begin=\"57.987\" end=\"60.792\">"));
+    assert!(rows[27].ends_with("<span begin=\"59.650\" end=\"60.202\">wet </span></p>"));
+    // Keep T5's exact millisecond matching: only three translation timestamps
+    // coincide with these QRC starts; eight matching romanization rows are nonblank.
+    assert_eq!(text.matches("<span ttm:role=\"x-translation\">").count(), 3);
+    assert_eq!(text.matches("<span ttm:role=\"x-roman\">").count(), 8);
+    assert!(rows[8]
+        .ends_with("</span><span ttm:role=\"x-translation\">如汽水那般令人充满活力</span></p>"));
+    assert!(rows[5].ends_with(
+        "</span><span ttm:role=\"x-roman\">ri deu mi  neol  um ji gi myeon </span></p>"
+    ));
+    assert!(!text.contains("LyricContent"));
+    assert!(!text.contains("QrcInfos"));
+}
+
+#[test]
 fn lyric_new_handles_each_missing_or_invalid_auxiliary_track_independently() {
     for translation in [false, true] {
         for roman in [false, true] {
-            let mut raw = wet_lyrics();
+            let mut raw = synthetic_wet_lyrics();
             let data = raw["data"].as_object_mut().unwrap();
             if !translation {
                 data.remove("qrctrans");
@@ -483,7 +571,7 @@ fn lyric_new_handles_each_missing_or_invalid_auxiliary_track_independently() {
         }
     }
     for invalid in [Value::Null, json!(""), json!({}), json!("unavailable")] {
-        let mut raw = wet_lyrics();
+        let mut raw = synthetic_wet_lyrics();
         for field in ["qrctrans", "qrcroma", "lrctrans"] {
             raw["data"][field] = invalid.clone();
         }
@@ -495,7 +583,7 @@ fn lyric_new_handles_each_missing_or_invalid_auxiliary_track_independently() {
         }
     }
     // Auxiliary tracks alone cannot manufacture a main candidate.
-    let mut raw = wet_lyrics();
+    let mut raw = synthetic_wet_lyrics();
     raw["data"]["qrc"] = json!("encrypted-unavailable");
     raw["data"]["lrc"] = Value::Null;
     assert!(converted_lyrics(&raw).is_empty());
@@ -503,7 +591,7 @@ fn lyric_new_handles_each_missing_or_invalid_auxiliary_track_independently() {
 
 #[test]
 fn lrc_candidate_uses_lrctrans_with_offsets_and_repeated_timestamps() {
-    let candidates = converted_lyrics(&wet_lyrics());
+    let candidates = converted_lyrics(&synthetic_wet_lyrics());
     let text = &candidates[1].text;
     assert!(text.contains("itunes:timing=\"Line\""));
     assert_eq!(text.matches("<p ").count(), 2);

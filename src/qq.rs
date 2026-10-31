@@ -1188,12 +1188,15 @@ fn lrc_lines(text: &str) -> Vec<LyricLine> {
     }
     lines
 }
-fn qrc_lines(text: &str) -> Vec<LyricLine> {
-    // /lyric/new may omit QRC. Accept decrypted [start,duration]word(offset,duration)
-    // and QQ's XML LyricContent envelope; encrypted/compressed QRC falls through.
-    let envelope = Regex::new(r#"\bLyricContent\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap();
+fn qrc_content(text: &str) -> String {
+    // QQ leaves quotes inside LyricContent unescaped. Only a matching quote
+    // followed by optional whitespace and /> ends the value, across newlines.
+    // Clipped responses may omit that delimiter; retain their available content.
+    let envelope =
+        Regex::new(r#"(?s)\bLyricContent\s*=\s*(?:"(.*?)(?:"\s*/>|$)|'(.*?)(?:'\s*/>|$))"#)
+            .unwrap();
     let content = envelope.captures(text);
-    let text = content
+    content
         .as_ref()
         .and_then(|c| c.get(1).or_else(|| c.get(2)))
         .map_or(text, |m| m.as_str())
@@ -1203,7 +1206,12 @@ fn qrc_lines(text: &str) -> Vec<LyricLine> {
         .replace("&quot;", "\"")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-        .replace("&amp;", "&");
+        .replace("&amp;", "&")
+}
+fn qrc_lines(text: &str) -> Vec<LyricLine> {
+    // /lyric/new may omit QRC. Accept decrypted [start,duration]word(offset,duration)
+    // and QQ's XML LyricContent envelope; encrypted/compressed QRC falls through.
+    let text = qrc_content(text);
     let line = Regex::new(r"(?m)\[(\d+),(\d+)\]([^\r\n]*)").unwrap();
     let word = Regex::new(r"([^()]+)\((\d+),(\d+)\)").unwrap();
     let mut lines = Vec::new();
