@@ -94,6 +94,22 @@ T6 离线验证：
 - `node --test --test-isolation=none tests/alac_check.mjs tests/joc_wasm.mjs tests/agent_duet.mjs tests/qq_source.mjs tests/qq_ui.mjs tests/qq_joc_input.mjs tests/player_artwork.cjs tests/player_quality.mjs tests/playback_quality.mjs`：**82 项通过，0 失败**，覆盖 CI 的 QQ、歌词对唱、ALAC 及 JOC 子集。
 - `cargo clippy --offline -p am-hook --all-targets -- -D warnings`：通过，无 warning。修改文件使用已安装的 `rustfmt +nightly-2026-08-20` 格式检查，`git diff --check` 通过。
 
+## T7：辅助轨有效文本与行首容差（2026-10-31）
+
+翻译漏挂的根因是 `auxiliary_lines` 建表后按主行起始毫秒精确 `get`：`qrctrans` 的 LRC 时间只到百分秒，`qrc` 则保留整数毫秒，量化差会让同一行无法命中。监工提供的完整真实样本 `tests/fixtures/qq_lyric_new_wet_full.json` 有 59 个主行、54 条非空翻译，旧规则只命中 8 条；这 54 条翻译都能在主行附近找到对应行，本文件测得最大行首差为 9ms。
+
+有效文本的取值也改为由辅助轨自行保证：`words` 非空时按原顺序拼接所有词文本，保留空格；否则使用 `line.text`，之后统一过滤空白与 `//`。这样即使逐字行的 `line.text` 为空或过期，也不会丢失 `words` 中的正文。需要区分任务描述与本基底的实际数据：`dcfad36` 的 `qrc_lines` 已经将词文本同步到 `line.text`，且当前完整真实样本的 `qrcroma` 虽有 59 行，实际只有 **16 行非空发音、43 行仅空格词**，因此原基底和本轮修复都输出 16 个有效 `x-roman` span。依照过滤空文本的要求，此样本无法支持任务原定的「≥50 个发音 span」验收；不能用空 span 或主歌词补成发音。
+
+翻译与发音统一按主行输入顺序匹配，各用独立的 BTreeMap。对每行只检查未消费条目中行首之前及之后的最近邻，取行首绝对差 **≤120ms** 的最近条目，等距时取较早时间；匹配后立即移除，同一辅助条目最多使用一次，先到的主行优先。没有容差内条目时不挂辅助文本。只比较行首，不比较逐字起点或行尾，也不靠行号配对；LRC 的 offset 在匹配前已折算为毫秒。每次查找及移除为 O(log A)，两轨独立，避免扫描整个容差窗口。
+
+完整 fixture 回归核对 QRC 的 **59 个主行、54 个翻译 span 和 16 个有效发音 span**，包含首个翻译从 9.320s 挂到 9.329s、末行 150.233s 与完整逐字时间；LRC 仍为 **59 个主行、54 个翻译 span、无发音 span**，行级时间不变。T6 的旧截断 fixture 与引号/信封单测继续保留，28 个主行、带引号正文、末行四个完整词的时间和 8 个发音 span 均通过；应用新容差后翻译从 3 个增至 **23 个**，末行新增翻译，因此只调整相关数量与末尾结构断言。新增边界回归覆盖空 `line.text` 的逐字文本、优先取词文本、空白及占位、±120ms 端点、±121ms 拒绝、等距、单次消费、重复/乱序主行、两个 role 独立消费、XML 转义和 u64 时间边界。
+
+T7 离线验证：
+
+- `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**83 项通过，0 失败，仅跳过指定 3 项 wrapper 测试**。
+- `node --test --test-isolation=none tests/alac_check.mjs tests/joc_wasm.mjs tests/agent_duet.mjs tests/qq_source.mjs tests/qq_ui.mjs tests/qq_joc_input.mjs tests/player_artwork.cjs tests/player_quality.mjs tests/playback_quality.mjs`：**82 项通过，0 失败**，覆盖 CI 的 QQ、歌词对唱、ALAC 及 JOC 子集。
+- `cargo clippy --offline -p am-hook --all-targets -- -D warnings`、修改文件的 Rust 格式检查及 `git diff --check`：**全部通过，无 warning**。
+
 ## 在线播放默认音质（T3，2026-10-31）
 
 设置中心新增「在线播放默认音质 / Default streaming quality」，QQ 与 Apple Music 共用一个值。沿用 `prefs.mjs` 的 `am-hook:settings` localStorage 记录，存于 `playback.quality`；取值为 `hires / lossless / dolby / high / standard`，默认 `hires`。旧记录缺少该分组或值无效时恢复 Hi-Res，修改与其他标签页的 storage 事件沿用现有同步机制。

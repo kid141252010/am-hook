@@ -1245,9 +1245,28 @@ fn qrc_lines(text: &str) -> Vec<LyricLine> {
 fn auxiliary_lines(lines: Vec<LyricLine>) -> BTreeMap<u64, String> {
     lines
         .into_iter()
-        .filter(|line| !matches!(line.text.trim(), "" | "//"))
-        .map(|line| (line.start, line.text))
+        .filter_map(|line| {
+            let text = if line.words.is_empty() {
+                line.text
+            } else {
+                line.words.iter().map(|word| word.text.as_str()).collect()
+            };
+            (!matches!(text.trim(), "" | "//")).then_some((line.start, text))
+        })
         .collect()
+}
+fn take_auxiliary(entries: &mut BTreeMap<u64, String>, start: u64) -> Option<String> {
+    // Only the immediate predecessor/successor can be nearest. Prefer the earlier
+    // timestamp on ties; removing it gives the first main line exclusive use.
+    let before = entries.range(..=start).next_back();
+    let after = entries.range(start..).next();
+    let nearest = before
+        .into_iter()
+        .chain(after)
+        .map(|(&time, _)| time)
+        .min_by_key(|&time| time.abs_diff(start))
+        .filter(|&time| time.abs_diff(start) <= 120)?;
+    entries.remove(&nearest)
 }
 fn render_lyrics(
     lines: Vec<LyricLine>,
@@ -1258,8 +1277,8 @@ fn render_lyrics(
     if lines.is_empty() {
         return None;
     }
-    let translations = auxiliary_lines(translations);
-    let pronunciations = auxiliary_lines(pronunciations);
+    let mut translations = auxiliary_lines(translations);
+    let mut pronunciations = auxiliary_lines(pronunciations);
     let mut out = String::from("<body><div>");
     for line in lines {
         out.push_str(&format!(
@@ -1280,13 +1299,13 @@ fn render_lyrics(
             }
         }
         // Direct children of <p>, as parseTTML/readVoice and AMLL TTML expect.
-        // Match millisecond line starts; missing/placeholder rows never shift later rows.
+        // Allow LRC/QRC rounding differences, consuming each match once per role.
         for (role, entries) in [
-            ("x-translation", &translations),
-            ("x-roman", &pronunciations),
+            ("x-translation", &mut translations),
+            ("x-roman", &mut pronunciations),
         ] {
-            if let Some(text) = entries.get(&line.start) {
-                out.push_str(&format!("<span ttm:role=\"{role}\">{}</span>", xml(text)));
+            if let Some(text) = take_auxiliary(entries, line.start) {
+                out.push_str(&format!("<span ttm:role=\"{role}\">{}</span>", xml(&text)));
             }
         }
         out.push_str("</p>");

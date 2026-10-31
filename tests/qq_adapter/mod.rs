@@ -456,6 +456,110 @@ fn synthetic_wet_lyrics() -> Value {
 }
 
 #[test]
+fn auxiliary_lines_prefers_word_text_and_filters_empty_or_placeholder_content() {
+    let lines = [
+        (1000, "", vec!["oneul ", "bam & <neo>"]),
+        (2000, "fallback & text", vec![]),
+        (3000, "stale text", vec![" ", "\t"]),
+        (4000, "stale text", vec![" /", "/ "]),
+        (5000, " // ", vec![]),
+        (6000, "\t", vec![]),
+        (7000, "stale text", vec!["actual ", "words"]),
+    ]
+    .into_iter()
+    .map(|(start, text, words)| LyricLine {
+        start,
+        end: start + 500,
+        text: text.into(),
+        words: words
+            .into_iter()
+            .map(|text| LyricWord {
+                start,
+                end: start + 500,
+                text: text.into(),
+            })
+            .collect(),
+    })
+    .collect();
+    assert_eq!(
+        auxiliary_lines(lines),
+        BTreeMap::from([
+            (1000, "oneul bam & <neo>".into()),
+            (2000, "fallback & text".into()),
+            (7000, "actual words".into()),
+        ])
+    );
+}
+
+#[test]
+fn auxiliary_matching_takes_the_nearest_unused_start_within_120ms() {
+    let mut entries = BTreeMap::from([
+        (880, "earlier boundary".into()),
+        (1001, "nearest".into()),
+        (1120, "later boundary".into()),
+        (2000, "exact".into()),
+        (3000, "outside".into()),
+        (u64::MAX, "maximum".into()),
+    ]);
+    assert_eq!(
+        take_auxiliary(&mut entries, 1000).as_deref(),
+        Some("nearest")
+    );
+    // Equidistant rows choose the earlier timestamp, and matches cannot be reused.
+    assert_eq!(
+        take_auxiliary(&mut entries, 1000).as_deref(),
+        Some("earlier boundary")
+    );
+    assert_eq!(
+        take_auxiliary(&mut entries, 1000).as_deref(),
+        Some("later boundary")
+    );
+    assert_eq!(take_auxiliary(&mut entries, 1000), None);
+    assert_eq!(take_auxiliary(&mut entries, 2000).as_deref(), Some("exact"));
+    assert_eq!(take_auxiliary(&mut entries, 2879), None);
+    assert_eq!(take_auxiliary(&mut entries, 3121), None);
+    assert_eq!(
+        take_auxiliary(&mut entries, 2880).as_deref(),
+        Some("outside")
+    );
+    // Distances near the timestamp limits must not wrap or overflow.
+    assert_eq!(take_auxiliary(&mut entries, 0), None);
+    entries.insert(0, "zero".into());
+    assert_eq!(take_auxiliary(&mut entries, 120).as_deref(), Some("zero"));
+    entries.insert(121, "positive".into());
+    assert_eq!(take_auxiliary(&mut entries, 0), None);
+    assert_eq!(take_auxiliary(&mut entries, 1).as_deref(), Some("positive"));
+    assert_eq!(
+        take_auxiliary(&mut entries, u64::MAX - 120).as_deref(),
+        Some("maximum")
+    );
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn auxiliary_roles_each_consume_matches_once_in_main_line_order() {
+    let text = qrc_ttml(
+        "[1090,100]first(1090,100)\n[1000,100]closer(1000,100)\n[1090,100]duplicate(1090,100)",
+        Some("[00:01.001]translation & <text>"),
+        Some("[1001,100]ro(1001,50)man & <text>(1051,50)"),
+    )
+    .unwrap();
+    let rows: Vec<_> = Regex::new(r"<p .*?</p>")
+        .unwrap()
+        .find_iter(&text)
+        .map(|row| row.as_str())
+        .collect();
+    assert_eq!(rows.len(), 3);
+    assert!(rows[0].starts_with("<p begin=\"1.090\""));
+    assert!(rows[0].ends_with(
+        "</span><span ttm:role=\"x-translation\">translation &amp; &lt;text&gt;</span><span ttm:role=\"x-roman\">roman &amp; &lt;text&gt;</span></p>"
+    ));
+    for row in &rows[1..] {
+        assert!(!row.contains("ttm:role="), "{row}");
+    }
+}
+
+#[test]
 fn synthetic_wet_lyric_new_aligns_translation_and_romanization_in_amll_inline_format() {
     let raw = synthetic_wet_lyrics();
     let row_pattern = Regex::new(r"<p .*?</p>").unwrap();
@@ -532,15 +636,69 @@ fn real_wet_lyric_new_preserves_lines_and_auxiliary_spans_after_unescaped_quotes
     assert!(rows[1].contains("Park &quot;</span>"));
     assert!(rows[1].contains("Asiansoul&quot;</span>"));
     assert!(rows[27].starts_with("<p begin=\"57.987\" end=\"60.792\">"));
-    assert!(rows[27].ends_with("<span begin=\"59.650\" end=\"60.202\">wet </span></p>"));
-    // Keep T5's exact millisecond matching: only three translation timestamps
-    // coincide with these QRC starts; eight matching romanization rows are nonblank.
-    assert_eq!(text.matches("<span ttm:role=\"x-translation\">").count(), 3);
+    assert!(rows[27].contains("<span begin=\"59.650\" end=\"60.202\">wet </span>"));
+    assert!(!rows[27].contains(">we<"));
+    // The tolerance now recovers all 23 translations for these clipped main rows;
+    // the eight nonblank romanization rows and all T6 timing checks remain.
+    assert_eq!(
+        text.matches("<span ttm:role=\"x-translation\">").count(),
+        23
+    );
     assert_eq!(text.matches("<span ttm:role=\"x-roman\">").count(), 8);
     assert!(rows[8]
         .ends_with("</span><span ttm:role=\"x-translation\">如汽水那般令人充满活力</span></p>"));
     assert!(rows[5].ends_with(
         "</span><span ttm:role=\"x-roman\">ri deu mi  neol  um ji gi myeon </span></p>"
+    ));
+    assert!(!text.contains("LyricContent"));
+    assert!(!text.contains("QrcInfos"));
+}
+
+#[test]
+fn full_wet_lyric_new_aligns_available_auxiliary_text_without_changing_lrc() {
+    let raw: Value =
+        serde_json::from_str(include_str!("../fixtures/qq_lyric_new_wet_full.json")).unwrap();
+    let candidates = converted_lyrics(&raw);
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].source, "qrc");
+    assert_eq!(candidates[1].source, "lrc");
+    let text = &candidates[0].text;
+    let rows: Vec<_> = Regex::new(r"<p .*?</p>")
+        .unwrap()
+        .find_iter(text)
+        .map(|row| row.as_str())
+        .collect();
+    assert_eq!(rows.len(), 59);
+    assert!(text.contains("itunes:timing=\"Word\""));
+    assert_eq!(
+        text.matches("<span ttm:role=\"x-translation\">").count(),
+        54
+    );
+    // The supplied full fixture has 16 nonblank qrcroma lines; the other 43
+    // contain only whitespace words and must not produce empty role spans.
+    assert_eq!(text.matches("<span ttm:role=\"x-roman\">").count(), 16);
+    assert!(rows[5].starts_with("<p begin=\"9.329\" end=\"11.289\">"));
+    assert!(rows[5].ends_with(
+        "</span><span ttm:role=\"x-translation\">若节奏让你舞动起来</span><span ttm:role=\"x-roman\">ri deu mi  neol  um ji gi myeon </span></p>"
+    ));
+    assert!(rows[58].starts_with("<p begin=\"150.233\" end=\"151.740\">"));
+    assert!(rows[58].ends_with(
+        "<span begin=\"151.309\" end=\"151.740\">sweat</span><span ttm:role=\"x-translation\">亲爱的 尽管让我挥洒汗水吧</span></p>"
+    ));
+    for row in &rows[..5] {
+        assert!(!row.contains("ttm:role="), "{row}");
+    }
+
+    let lrc = &candidates[1].text;
+    assert!(lrc.contains("itunes:timing=\"Line\""));
+    assert_eq!(lrc.matches("<p ").count(), 59);
+    assert_eq!(lrc.matches("<span ttm:role=\"x-translation\">").count(), 54);
+    assert!(!lrc.contains("x-roman"));
+    assert!(lrc.contains(
+        "<p begin=\"9.320\" end=\"11.280\">리듬이 널 움직이면<span ttm:role=\"x-translation\">若节奏让你舞动起来</span></p>"
+    ));
+    assert!(lrc.contains(
+        "<p begin=\"150.230\" end=\"158.230\">Baby come and make me sweat<span ttm:role=\"x-translation\">亲爱的 尽管让我挥洒汗水吧</span></p>"
     ));
     assert!(!text.contains("LyricContent"));
     assert!(!text.contains("QrcInfos"));
