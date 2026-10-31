@@ -162,3 +162,20 @@ T3 离线验证：
 - 修改过的 JS/MJS 均通过 `node --check`，`git diff --check` 通过。
 
 尺寸阶梯结果来自任务已确认的实测，本轮离线回归未重新请求 CDN。
+
+## QQ 封面跨域取图与 AMLL 流体背景（T4，2026-10-31）
+
+根因已由任务实测确认：`y.qq.com/music/photo_new` 不返回 `Access-Control-Allow-Origin`，只有 `Access-Control-Expose-Headers`，后者不能授权跨域读取。普通 `<img>` 能显示直链，但歌词面板 backdrop 和播放器 MediaSession 都需要先 `fetch → blob`，会被浏览器 CORS 拦截；Apple 的 mzstatic 支持 CORS，原路径正常。本轮离线验证不重新请求上游，也不将模拟图像响应描述为浏览器或线上端到端实测。
+
+后端新增 `GET /qq/cover/:albumMid`，沿用 `valid_mid` 的 1–32 位 ASCII 字母数字校验，只拼装 `https://y.qq.com/music/photo_new/T002R500x500M000{albumMid}_5.jpg`；没有接受任意 URL 的入口。封面客户端使用既有 QQ 出站代理配置，并禁用重定向，保证只访问该固定模板。成功响应按字节流返回 `image/jpeg`，带 `Cache-Control: public, max-age=86400`；上游 404 返回 404，其他非成功状态（包括重定向）返回 502，不转发上游私有头或错误正文。未配置 QQ 时仍返回 404。
+
+前端保留 `artwork` 作为显示直链，在 `qq.entryOf → qualityEntry / qualityItem` 的播放条目中增加 `artworkFetchUrl: /qq/cover/<albumMid>`。`AmPlayer.start` 同时为旧条目和恢复的来源上下文重建该字段，优先取 `qq.albumMid`，其次为 `albumId`，缺失时沿用条目 ID 兜底。`app.mjs` 的 `getMeta` 仅在当前曲为 QQ 时透传该字段，`panel.mjs::loadArtwork` 用它为 AMLL 或经典 backdrop 取 blob；`updateMediaSession` 也仅对 QQ 选用此地址。Apple 的封面取图地址及元数据路径保持原有行为。
+
+搜索行、详情（含光晕）、迷你播放条和队列继续使用 QQ 直链。面板横向封面、竖向小封面及竖向大封面共用 `app.html` 中的 `<img class="lyrics-art">`，由 `renderHeader` 设置原 `artwork`；竖向大封面不是 blob/canvas 消费方，保持直链。
+
+验证结果：
+
+- `cargo test --offline -p am-hook --lib -- --skip wrapper::tests::test_concurrency_limit_and_authorization --skip wrapper::tests::test_queue_stats_and_wait --skip wrapper::tests::test_abandoned_request_holds_permit`：**70 项通过，0 失败，仅过滤指定 3 项 wrapper 测试**。新增固定模板/MID 校验、真实路由对编码注入与超长 MID 的拒绝、JPEG 分块流/缓存头/上游错误检查；既有代理配置测试扩展到封面客户端。
+- CI 子集 `node --test tests/qq_source.mjs tests/qq_ui.mjs tests/qq_joc_input.mjs tests/player_artwork.cjs tests/player_quality.mjs tests/playback_quality.mjs`：**6 个文件全部通过**；同组加 `--test-isolation=none` 逐项运行，**59 项通过，0 失败**。覆盖 QQ/Apple MediaSession 取图与 blob 复用、执行真实面板取图/封面函数的同源取图和 Apple 切换、取消旧请求、旧播放条目恢复，及原有详情 `<img>` 与队列直链回归。面板测试隔离了布局/WebGL 初始化，未在此环境渲染真实 AMLL 画布。
+- `cargo clippy --offline -p am-hook --all-targets -- -D warnings`：**通过，无 warning**。
+- 修改过的 JS/MJS 通过 `node --check`，`git diff --check` 通过。

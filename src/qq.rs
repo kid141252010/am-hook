@@ -57,6 +57,12 @@ fn check_mid(mid: &str) -> ApiResult<()> {
         Err(bad())
     }
 }
+fn cover_url(album_mid: &str) -> ApiResult<String> {
+    check_mid(album_mid)?;
+    Ok(format!(
+        "https://y.qq.com/music/photo_new/T002R500x500M000{album_mid}_5.jpg"
+    ))
+}
 fn cdn_url(raw: &str) -> Option<reqwest::Url> {
     let url = reqwest::Url::parse(raw).ok()?;
     (url.scheme() == "https"
@@ -123,6 +129,7 @@ pub struct Qq {
     amll: String,
     api: reqwest::Client,
     media: reqwest::Client,
+    cover: reqwest::Client,
     permits: tokio::sync::Semaphore,
     searches: Cache<SearchResult>,
     songs: Cache<Song>,
@@ -150,9 +157,17 @@ impl Qq {
                     a.stop()
                 }
             }));
+        // Artwork accepts exactly cover_url's template, including across redirects.
+        let mut cover = reqwest::Client::builder()
+            .http1_only()
+            .user_agent("am-hook")
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none());
         if let Some(proxy) = proxy {
             api = api.proxy(proxy.clone());
-            media = media.proxy(proxy);
+            media = media.proxy(proxy.clone());
+            cover = cover.proxy(proxy);
         }
         Ok(Self {
             base: base.trim_end_matches('/').into(),
@@ -163,6 +178,9 @@ impl Qq {
             media: media
                 .build()
                 .map_err(|e| format!("QQ CDN client: {}", e.without_url()))?,
+            cover: cover
+                .build()
+                .map_err(|e| format!("QQ cover client: {}", e.without_url()))?,
             permits: tokio::sync::Semaphore::new(8),
             searches: Cache::new(128, 600),
             songs: Cache::new(4096, 86400),
@@ -825,12 +843,39 @@ fn adapter(state: &AppState) -> ApiResult<&Qq> {
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/qq/search", get(search))
+        .route("/qq/cover/:albumMid", get(cover))
         .route("/qq/song/:mid", get(info))
         .route("/qq/song/:mid/play", get(play))
         .route("/qq/song/:mid/download", get(download))
         .route("/qq/song/:mid/lyrics", get(lyrics))
         .route("/qq/song/:mid/qualities", get(qualities))
         .route("/qq/capabilities", get(capabilities))
+}
+async fn cover(
+    State(state): State<Arc<AppState>>,
+    Path(album_mid): Path<String>,
+) -> ApiResult<Response> {
+    let qq = adapter(&state)?;
+    let url = cover_url(&album_mid)?;
+    cover_response(qq.cover.get(url).send().await.map_err(network)?)
+}
+fn cover_response(response: reqwest::Response) -> ApiResult<Response> {
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(missing());
+    }
+    if !response.status().is_success() {
+        return Err(unavailable());
+    }
+    use futures::TryStreamExt;
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .body(Body::from_stream(
+            response
+                .bytes_stream()
+                .map_err(|e| std::io::Error::other(e.without_url())),
+        ))
+        .unwrap())
 }
 async fn capabilities(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
     adapter(&state)?;

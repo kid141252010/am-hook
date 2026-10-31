@@ -1,4 +1,4 @@
-// API requests use the local adapter; artwork uses public QQ CDN URLs from its DTOs.
+// Display artwork uses public QQ CDN URLs; blob consumers use the local cover adapter.
 import { trackKey, withIdentity } from './track.mjs';
 import { playbackQualityChain } from '../playback-quality.mjs';
 export { trackKey } from './track.mjs';
@@ -39,6 +39,7 @@ const qualityQuery = (quality) => quality === undefined ? '' : `?quality=${quali
 export const songPath = (id) => `/qq-song/${mid(id)}`;
 export const playUrl = (id, quality) => `/qq/song/${mid(id)}/play${qualityQuery(quality)}`;
 export const downloadUrl = (id, quality) => `/qq/song/${mid(id)}/download${qualityQuery(quality)}`;
+export const coverUrl = (albumMid) => `/qq/cover/${mid(albumMid)}`;
 /** photo_new only serves discrete sizes. Resolve before Apple-sized consumers see it. */
 export function artworkUrl(artwork) {
   const url = typeof artwork === 'string' ? artwork : artwork?.url;
@@ -58,7 +59,8 @@ export function toTrack(dto) {
   });
 }
 export function entryOf(track) {
-  return withIdentity({ ...track, track: track.id, artwork: artworkUrl(track.artwork) });
+  return withIdentity({ ...track, track: track.id, artwork: artworkUrl(track.artwork),
+    artworkFetchUrl: coverUrl(track.qq?.albumMid ?? track.albumId ?? track.id) });
 }
 export function qualityEntry(track, quality = currentQuality, row) {
   return { ...entryOf(track), quality: qualityId(quality), ...playbackInfo(quality, row) };

@@ -234,8 +234,9 @@ const safeName = (name) => name.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').trim
  * root：#lyrics-overlay；toggle：播放条上的歌词按钮（打开歌词；界面里切换是否显示歌词）；bar：播放条，
  * 点击其中非控件区域（封面、标题、空白处）展开界面（没有歌词时也能展开）；界面打开时并入 .lyrics-controls，
  * 歌词按钮与待播清单按钮移到 .lyrics-toggles，关闭时放回原处。
- * getMeta() 返回正在播放的歌曲的 { title, artist, artists, artwork, country? }（artists: [{ name, href }]，用于艺人链接；
+ * getMeta() 返回正在播放的歌曲的 { title, artist, artists, artwork, artworkFetchUrl?, country? }（artists: [{ name, href }]，用于艺人链接；
  * 有 country 时优先作为请求歌词的地区）；t 为界面文案函数；notify 显示提示。
+ * artworkFetchUrl 为 blob/画布取图地址，省略时使用 artwork；封面 <img> 始终使用 artwork。
  * navigate(href)：前端路由，点击艺人链接时关闭界面并由它打开页面（播放不中断）；省略时按普通链接跳转。
  * onShow()：界面展开或展开期间切歌时调用（如更新标题旁的喜爱与「更多」按钮）。
  * 返回 { setTrack(id, country), close() }：setTrack 在切歌时调用，界面跟随正在播放的歌曲；close 收起界面。
@@ -713,11 +714,12 @@ export function mountLyrics({ root, toggle, bar, player, getMeta, t, notify, onL
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
-  /** 背景使用页面已有的封面；取不到封面或背景不可用时保留纯色背景 */
+  /** QQ 背景经同源代理取 blob，避免 photo_new 缺少 CORS；<img> 封面仍用直链。 */
   function loadArtwork() {
     const target = backdrop;
     if (!target) return;
-    const source = getMeta().artwork || '';
+    const meta = getMeta();
+    const source = meta.artworkFetchUrl || meta.artwork || '';
     if (source === artworkSource) { if (!covered) target.resume(); return; }
     artworkSource = source;
     if (artworkController) artworkController.abort();

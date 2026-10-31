@@ -2966,6 +2966,8 @@
         const qq = await loadQq();
         if (token !== this.playToken) return;
         qq.setCurrentQuality(item.quality ?? qq.currentQuality);
+        // Rebuild for older saved/source contexts too; <img> keeps item.artwork.
+        item.artworkFetchUrl = qq.coverUrl(item.qq?.albumMid ?? item.albumId ?? item.track);
       }
       // 同一首歌切换音质时从当前位置继续；专辑页换曲（track 不同）从头播放
       const resumeAt = savedTime ?? (this.current && trackKey(this.current) === trackKey(item) ? this.transport().currentTime : 0);
@@ -3168,7 +3170,7 @@
 
     updateMediaSession() {
       if (!('mediaSession' in navigator) || !global.MediaMetadata) return;
-      const source = this.current?.artwork || '';
+      const source = (this.current?.source === 'qq' ? this.current.artworkFetchUrl : this.current?.artwork) || '';
       if (source !== this.mediaArtSource) {
         if (this.mediaArtController) this.mediaArtController.abort();
         if (this.mediaArtUrl) URL.revokeObjectURL(this.mediaArtUrl);

@@ -38,6 +38,8 @@ test('QQ DTO maps names, timing, badges and direct QQ artwork', () => {
   assert.equal(entry.track, dto.id);
   assert.equal(entry.key, track.key);
   assert.equal(entry.artwork, 'https://y.qq.com/music/photo_new/T002R500x500M000003DFRzD192KKD_5.jpg');
+  assert.equal(entry.artworkFetchUrl, `/qq/cover/${dto.albumMid}`);
+  assert.equal(qq.qualityItem(track, 'SQ').artworkFetchUrl, entry.artworkFetchUrl);
   const opaque = { ...dto, cover: 'https://y.qq.com/cover.jpg?version=5' };
   assert.equal(qq.entryOf(qq.toTrack(opaque)).artwork, opaque.cover);
 });
@@ -54,9 +56,11 @@ test('QQ optional fields default safely; invalid IDs cannot form adapter paths',
     assert.throws(() => qq.playUrl(id));
     assert.throws(() => qq.downloadUrl(id));
     assert.throws(() => qq.songPath(id));
+    assert.throws(() => qq.coverUrl(id));
   }
   assert.equal(qq.playUrl('1'), '/qq/song/1/play');
   assert.equal(qq.downloadUrl('1'), '/qq/song/1/download');
+  assert.equal(qq.coverUrl('1'), '/qq/cover/1');
 });
 
 test('QQ quality rows list all tiers, retain formats and sizes, and omit unavailable actions', () => {
@@ -441,6 +445,17 @@ test('restoring a native QQ context loads metadata without autoplay', async () =
   assert.equal(plays, 0);
   assert.equal(player.current.source, 'qq');
   assert.equal(player.audio.src, qq.playUrl(dto.id));
+});
+
+test('starting old QQ entries rebuilds the blob artwork URL while retaining the display URL', async () => {
+  for (const album of [{ qq: { albumMid: dto.albumMid } }, { albumId: dto.albumMid }, {}]) {
+    const player = playerHarness();
+    const artwork = qq.artworkUrl(dto.cover);
+    await player.start({ source: 'qq', track: dto.id, id: `qq:${dto.id}:HQ`, ...album,
+      artwork, streamUrl: qq.playUrl(dto.id), quality: 'HQ', ...qq.playbackInfo('HQ') }, { paused: true });
+    assert.equal(player.current.artwork, artwork);
+    assert.equal(player.current.artworkFetchUrl, `/qq/cover/${album.qq?.albumMid ?? album.albumId ?? dto.id}`);
+  }
 });
 
 test('switching source invalidates a pending Apple resolution before it can replace QQ context', async () => {

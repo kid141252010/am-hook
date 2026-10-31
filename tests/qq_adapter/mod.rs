@@ -67,7 +67,7 @@ fn proxy_environment_is_parsed_and_cli_takes_precedence() {
 }
 
 #[test]
-fn proxy_cli_parameter_reaches_both_qq_clients_without_changing_other_clients() {
+fn proxy_cli_parameter_reaches_all_qq_clients_without_changing_other_clients() {
     let default = AppState::new("http://127.0.0.1:12340".into());
     for proxy in ["socks5://127.0.0.1:11080", "http://127.0.0.1:11080"] {
         let cli = cli(&[
@@ -81,7 +81,7 @@ fn proxy_cli_parameter_reaches_both_qq_clients_without_changing_other_clients() 
         let state =
             AppState::with_qq_proxy(cli.config().unwrap(), cli.qq_proxy.as_deref()).unwrap();
         let qq = state.qq.as_ref().unwrap();
-        for client in [&qq.api, &qq.media] {
+        for client in [&qq.api, &qq.media, &qq.cover] {
             assert!(format!("{client:?}").contains("127.0.0.1:11080"));
         }
         assert_eq!(
@@ -106,6 +106,7 @@ fn absent_or_blank_proxy_preserves_default_clients() {
         let qq = state.qq.as_ref().unwrap();
         assert_eq!(format!("{:?}", qq.api), format!("{:?}", default.api));
         assert_eq!(format!("{:?}", qq.media), format!("{:?}", default.media));
+        assert_eq!(format!("{:?}", qq.cover), format!("{:?}", default.cover));
     }
 }
 
@@ -173,6 +174,76 @@ fn mids_and_cdn_urls_are_restricted() {
         "file:///tmp/x",
     ] {
         assert!(cdn_url(url).is_none());
+    }
+}
+#[test]
+fn cover_url_only_accepts_album_mids_and_uses_one_fixed_template() {
+    for mid in ["1", "003DFRzD192KKD", &"a".repeat(32)] {
+        assert_eq!(
+            cover_url(mid).ok().unwrap(),
+            format!("https://y.qq.com/music/photo_new/T002R500x500M000{mid}_5.jpg")
+        );
+    }
+    for mid in [
+        "",
+        "../x",
+        "a/b",
+        "a\\b",
+        "a?url=x",
+        "a#x",
+        "a.jpg",
+        "a_5",
+        "中文",
+        "https://example.invalid/x",
+        "%2F",
+        &"a".repeat(33),
+    ] {
+        assert_eq!(cover_url(mid).err().unwrap().0, StatusCode::BAD_REQUEST);
+    }
+    // Never follow upstream redirects to another URL, even on the QQ CDN.
+    assert!(format!("{:?}", qq().cover).contains("Policy(None)"));
+}
+#[tokio::test]
+async fn cover_streams_jpeg_with_cache_headers_and_hides_upstream_failures() {
+    let chunks = futures::stream::iter([
+        Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"\xff\xd8")),
+        Ok(bytes::Bytes::from_static(b"jpeg\xff\xd9")),
+    ]);
+    let upstream = axum::http::Response::builder()
+        .header(header::SET_COOKIE, "upstream-private=value")
+        .body(reqwest::Body::wrap_stream(chunks))
+        .unwrap();
+    let response = cover_response(upstream.into()).unwrap_or_else(|e| panic!("{}", e.0));
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "public, max-age=86400"
+    );
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    assert_eq!(
+        to_bytes(response.into_body(), 100).await.unwrap(),
+        b"\xff\xd8jpeg\xff\xd9"[..]
+    );
+    for (upstream, expected) in [
+        (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND),
+        (StatusCode::FOUND, StatusCode::BAD_GATEWAY),
+        (StatusCode::FORBIDDEN, StatusCode::BAD_GATEWAY),
+        (StatusCode::INTERNAL_SERVER_ERROR, StatusCode::BAD_GATEWAY),
+    ] {
+        let response = axum::http::Response::builder()
+            .status(upstream)
+            .header(header::LOCATION, "https://example.invalid/private")
+            .body("private upstream error")
+            .unwrap();
+        let response = cover_response(response.into())
+            .err()
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), expected);
+        assert!(!response.headers().contains_key(header::CACHE_CONTROL));
+        let body = to_bytes(response.into_body(), 1000).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("private"));
     }
 }
 #[test]
@@ -373,6 +444,8 @@ async fn unconfigured_routes_are_404_even_with_missing_or_invalid_parameters() {
         "/qq/song/a/download",
         "/qq/song/a/lyrics",
         "/qq/song/a/qualities",
+        "/qq/cover/003DFRzD192KKD",
+        "/qq/cover/a%21",
         "/qq/unknown",
     ] {
         assert_eq!(
@@ -381,6 +454,31 @@ async fn unconfigured_routes_are_404_even_with_missing_or_invalid_parameters() {
             "{path}"
         );
     }
+}
+#[tokio::test]
+async fn cover_route_rejects_invalid_album_mids_before_outbound_requests() {
+    let state = state(true);
+    for mid in [
+        "a%21",
+        "%2E%2E%2Fx",
+        "a%3Fx=1",
+        "https%3A%2F%2Fexample.invalid",
+        "%E4%B8%AD",
+        &"a".repeat(33),
+    ] {
+        let path = format!("/qq/cover/{mid}");
+        assert_eq!(
+            get(state.clone(), &path).await.status(),
+            StatusCode::BAD_REQUEST,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        get(state, "/qq/cover?url=https://example.invalid")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 #[tokio::test]
 async fn configured_routes_validate_mid_and_serve_only_cached_dtos() {
